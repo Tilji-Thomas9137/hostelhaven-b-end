@@ -54,17 +54,35 @@ const authorizeRoles = (allowedRoles) => {
       }
 
       // Get user profile from database to check role
-      const { data: userProfile, error } = await supabase
+      let { data: userProfile, error } = await supabase
         .from('users')
         .select('role')
         .eq('id', req.user.id)
         .single();
 
+      // If user profile doesn't exist, create it with default role as student
       if (error || !userProfile) {
-        return res.status(403).json({
-          error: 'Access denied',
-          message: 'User profile not found'
-        });
+        const { data: newProfile, error: profileError } = await supabase
+          .from('users')
+          .insert({
+            id: req.user.id,
+            email: req.user.email,
+            full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
+            phone: req.user.user_metadata?.phone || null, // Extract phone from metadata
+            role: req.user.user_metadata?.role || 'student' // Use role from metadata or default to student
+          })
+          .select('role')
+          .single();
+
+        if (profileError) {
+          console.error('Profile creation error in authorizeRoles:', profileError);
+          return res.status(403).json({
+            error: 'Access denied',
+            message: 'Failed to create user profile'
+          });
+        }
+
+        userProfile = newProfile;
       }
 
       if (!allowedRoles.includes(userProfile.role)) {

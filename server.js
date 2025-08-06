@@ -9,7 +9,6 @@ require('dotenv').config({ path: './config.env' });
 
 // Import routes
 const authRoutes = require('./routes/auth');
-const hostelRoutes = require('./routes/hostels');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
@@ -32,25 +31,9 @@ app.use(helmet({
 
 // CORS configuration
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://localhost:4173',
-      process.env.CORS_ORIGIN
-    ].filter(Boolean);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: true, // Allow all origins in development
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
@@ -103,7 +86,6 @@ app.get('/health', (req, res) => {
 
 // API routes
 app.use('/api/auth', authRoutes);
-app.use('/api/hostels', hostelRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

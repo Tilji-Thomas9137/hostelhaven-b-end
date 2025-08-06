@@ -15,7 +15,7 @@ router.get('/google', asyncHandler(async (req, res) => {
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
-      redirectTo: `${process.env.CORS_ORIGIN}/auth/callback`,
+      redirectTo: `http://localhost:5173/auth/callback`,
       queryParams: {
         access_type: 'offline',
         prompt: 'consent',
@@ -68,6 +68,7 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
         id: data.user.id,
         email: data.user.email,
         full_name: data.user.user_metadata?.full_name || data.user.email.split('@')[0],
+        phone: null, // Google OAuth doesn't provide phone numbers
         role: 'student' // Default role for Google OAuth users
       })
       .select()
@@ -174,13 +175,14 @@ router.post('/register', [
       throw new ValidationError('User with this email already exists');
     }
 
-    // Create user in Supabase Auth using admin client to bypass email confirmation
+    // Create user in Supabase Auth - requires email confirmation
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
-      email_confirm: true, // Auto-confirm email
+      email_confirm: false, // Require email confirmation
       user_metadata: {
         full_name: fullName,
+        phone: phone, // Include phone number in metadata
         role: role
       }
     });
@@ -194,38 +196,18 @@ router.post('/register', [
       throw new AuthenticationError(authError.message);
     }
 
-    // Create user profile in database
-    const { data: userProfile, error: profileError } = await supabase
-      .from('users')
-      .insert({
-        id: authData.user.id,
-        email,
-        full_name: fullName,
-        phone,
-        role
-      })
-      .select()
-      .single();
-
-    if (profileError) {
-      // If profile creation fails, delete the auth user
-      await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
-      throw new ValidationError('Failed to create user profile');
-    }
-
-    // Send welcome email (optional)
-    // await sendWelcomeEmail(email, fullName);
+    // Don't create user profile yet - wait for email confirmation
+    // The profile will be created when the user first logs in after confirming email
 
     res.status(201).json({
       success: true,
-      message: 'User registered successfully',
+      message: 'User registered successfully. Please check your email to confirm your account.',
       data: {
         user: {
-          id: userProfile.id,
-          email: userProfile.email,
-          fullName: userProfile.full_name,
-          role: userProfile.role,
-          createdAt: userProfile.created_at
+          id: authData.user.id,
+          email: authData.user.email,
+          fullName: fullName,
+          role: role
         }
       }
     });
@@ -268,14 +250,32 @@ router.post('/login', [
     }
 
     // Get user profile
-    const { data: userProfile, error: profileError } = await supabase
+    let { data: userProfile, error: profileError } = await supabase
       .from('users')
       .select('*')
       .eq('id', authData.user.id)
       .single();
 
+    // If user profile doesn't exist, create it with default role as student
     if (profileError || !userProfile) {
-      throw new AuthenticationError('User profile not found');
+      const { data: newProfile, error: createError } = await supabase
+        .from('users')
+        .insert({
+          id: authData.user.id,
+          email: authData.user.email,
+          full_name: authData.user.user_metadata?.full_name || authData.user.email.split('@')[0],
+          phone: authData.user.user_metadata?.phone || null, // Extract phone from metadata
+          role: authData.user.user_metadata?.role || 'student' // Use role from metadata or default to student
+        })
+        .select('*')
+        .single();
+
+      if (createError) {
+        console.error('Profile creation error in login:', createError);
+        throw new AuthenticationError('Failed to create user profile');
+      }
+
+      userProfile = newProfile;
     }
 
     res.json({
@@ -388,7 +388,7 @@ router.post('/forgot-password', [
 
   try {
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${process.env.CORS_ORIGIN}/reset-password`
+      redirectTo: `http://localhost:5173/reset-password`
     });
 
     if (error) {
@@ -448,13 +448,48 @@ router.post('/reset-password', [
 }));
 
 /**
+ * @route   GET /api/auth/check-email
+ * @desc    Check if email is available for registration
+ * @access  Public
+ */
+router.get('/check-email', asyncHandler(async (req, res) => {
+  const { email } = req.query;
+
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email parameter is required'
+    });
+  }
+
+  try {
+    // Check if user exists in Supabase Auth
+    const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.listUsers();
+    
+    if (authError) {
+      throw new AuthenticationError('Failed to check email availability');
+    }
+
+    const userExists = authUser.users.some(user => user.email === email);
+
+    res.json({
+      success: true,
+      available: !userExists,
+      message: userExists ? 'Email is already registered' : 'Email is available'
+    });
+  } catch (error) {
+    throw error;
+  }
+}));
+
+/**
  * @route   GET /api/auth/me
  * @desc    Get current user profile
  * @access  Private
  */
 router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
   try {
-    const { data: userProfile, error } = await supabase
+    let { data: userProfile, error } = await supabase
       .from('users')
       .select(`
         *,
@@ -464,8 +499,30 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
       .eq('id', req.user.id)
       .single();
 
+    // If user profile doesn't exist, create it with default role as student
     if (error || !userProfile) {
-      throw new AuthenticationError('User profile not found');
+      const { data: newProfile, error: profileError } = await supabase
+        .from('users')
+        .insert({
+          id: req.user.id,
+          email: req.user.email,
+          full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
+          phone: req.user.user_metadata?.phone || null, // Extract phone from metadata
+          role: req.user.user_metadata?.role || 'student' // Use role from metadata or default to student
+        })
+        .select(`
+          *,
+          hostels(name, city, state),
+          rooms(room_number, floor, room_type)
+        `)
+        .single();
+
+      if (profileError) {
+        console.error('Profile creation error:', profileError);
+        throw new AuthenticationError('Failed to create user profile');
+      }
+
+      userProfile = newProfile;
     }
 
     res.json({
@@ -519,15 +576,65 @@ router.put('/me', authMiddleware, [
     if (fullName) updates.full_name = fullName;
     if (phone) updates.phone = phone;
 
-    const { data: userProfile, error } = await supabase
+    // First check if user profile exists
+    let { data: userProfile, error } = await supabase
       .from('users')
-      .update(updates)
+      .select('*')
       .eq('id', req.user.id)
-      .select()
       .single();
 
-    if (error) {
-      throw new ValidationError('Failed to update profile');
+    // If user profile doesn't exist, create it first
+    if (error || !userProfile) {
+      const { data: newProfile, error: createError } = await supabase
+        .from('users')
+        .insert({
+          id: req.user.id,
+          email: req.user.email,
+          full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
+          phone: req.user.user_metadata?.phone || null, // Extract phone from metadata
+          role: req.user.user_metadata?.role || 'student', // Use role from metadata or default to student
+          ...updates // Include any updates in the initial creation
+        })
+        .select()
+        .single();
+
+      if (createError) {
+        console.error('Profile creation error in update:', createError);
+        throw new ValidationError('Failed to create user profile');
+      }
+
+      userProfile = newProfile;
+    } else {
+      // Update existing profile
+      const { data: updatedProfile, error: updateError } = await supabase
+        .from('users')
+        .update(updates)
+        .eq('id', req.user.id)
+        .select()
+        .single();
+
+      if (updateError) {
+        throw new ValidationError('Failed to update profile');
+      }
+
+      userProfile = updatedProfile;
+
+      // Also update Supabase Auth user metadata if phone or fullName is updated
+      if (fullName || phone) {
+        const metadataUpdates = {};
+        if (fullName) metadataUpdates.full_name = fullName;
+        if (phone) metadataUpdates.phone = phone;
+
+        const { error: metadataError } = await supabaseAdmin.auth.admin.updateUserById(
+          req.user.id,
+          { user_metadata: metadataUpdates }
+        );
+
+        if (metadataError) {
+          console.error('Metadata update error:', metadataError);
+          // Don't throw error here as the profile was updated successfully
+        }
+      }
     }
 
     res.json({
