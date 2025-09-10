@@ -7,15 +7,26 @@ const rateLimit = require('express-rate-limit');
 const slowDown = require('express-slow-down');
 require('dotenv').config({ path: './config.env' });
 
+// Check configuration
+const { checkConfiguration } = require('./scripts/check-config');
+const isConfigured = checkConfiguration();
+
 // Import routes
 const authRoutes = require('./routes/auth');
+const paymentsRoutes = require('./routes/payments');
+const complaintsRoutes = require('./routes/complaints');
+const leaveRequestsRoutes = require('./routes/leave-requests');
+const roomsRoutes = require('./routes/rooms');
+const notificationsRoutes = require('./routes/notifications');
+const adminRoutes = require('./routes/admin');
+const roomAllocationsRoutes = require('./routes/room-allocations');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
 const { authMiddleware } = require('./middleware/auth');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3002;
 
 // Security middleware
 app.use(helmet({
@@ -68,9 +79,14 @@ app.use(compression());
 
 // Logging middleware
 if (process.env.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
+  // Only log errors (4xx and 5xx responses)
+  app.use(morgan('dev', {
+    skip: function (req, res) { return res.statusCode < 400; }
+  }));
 } else {
-  app.use(morgan('combined'));
+  app.use(morgan('combined', {
+    skip: function (req, res) { return res.statusCode < 400; }
+  }));
 }
 
 // Health check endpoint
@@ -86,6 +102,13 @@ app.get('/health', (req, res) => {
 
 // API routes
 app.use('/api/auth', authRoutes);
+app.use('/api/payments', paymentsRoutes);
+app.use('/api/complaints', complaintsRoutes);
+app.use('/api/leave-requests', leaveRequestsRoutes);
+app.use('/api/rooms', roomsRoutes);
+app.use('/api/notifications', notificationsRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/room-allocations', roomAllocationsRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

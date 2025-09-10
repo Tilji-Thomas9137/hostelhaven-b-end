@@ -8,7 +8,10 @@
     "dev": "nodemon server.js",
     "test": "jest",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "seed": "node scripts/seed-data.js",
+    "check-config": "node scripts/check-config.js",
+    "setup": "node scripts/check-config.js"
   },
   "keywords": [
     "hostel",

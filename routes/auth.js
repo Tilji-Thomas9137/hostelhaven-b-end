@@ -491,11 +491,7 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
   try {
     let { data: userProfile, error } = await supabase
       .from('users')
-      .select(`
-        *,
-        hostels(name, city, state),
-        rooms(room_number, floor, room_type)
-      `)
+      .select('*')
       .eq('id', req.user.id)
       .single();
 
@@ -507,14 +503,10 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
           id: req.user.id,
           email: req.user.email,
           full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
-          phone: req.user.user_metadata?.phone || null, // Extract phone from metadata
-          role: req.user.user_metadata?.role || 'student' // Use role from metadata or default to student
+          phone: req.user.user_metadata?.phone || null,
+          role: req.user.user_metadata?.role || 'student'
         })
-        .select(`
-          *,
-          hostels(name, city, state),
-          rooms(room_number, floor, room_type)
-        `)
+        .select('*')
         .single();
 
       if (profileError) {
@@ -535,8 +527,8 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
           role: userProfile.role,
           phone: userProfile.phone,
           avatarUrl: userProfile.avatar_url,
-          hostel: userProfile.hostels,
-          room: userProfile.rooms,
+          hostelId: userProfile.hostel_id || null,
+          roomId: userProfile.room_id || null,
           createdAt: userProfile.created_at,
           updatedAt: userProfile.updated_at
         }
@@ -561,7 +553,11 @@ router.put('/me', authMiddleware, [
   body('phone')
     .optional()
     .isMobilePhone()
-    .withMessage('Please provide a valid phone number')
+    .withMessage('Please provide a valid phone number'),
+  body('avatarUrl')
+    .optional()
+    .isURL()
+    .withMessage('Please provide a valid avatar URL')
 ], asyncHandler(async (req, res) => {
   // Check for validation errors
   const errors = validationResult(req);
@@ -569,12 +565,13 @@ router.put('/me', authMiddleware, [
     throw new ValidationError('Validation failed', errors.array());
   }
 
-  const { fullName, phone } = req.body;
+  const { fullName, phone, avatarUrl } = req.body;
 
   try {
     const updates = {};
     if (fullName) updates.full_name = fullName;
     if (phone) updates.phone = phone;
+    if (avatarUrl) updates.avatar_url = avatarUrl;
 
     // First check if user profile exists
     let { data: userProfile, error } = await supabase

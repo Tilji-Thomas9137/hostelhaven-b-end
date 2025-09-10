@@ -1,43 +1,68 @@
 const { createClient } = require('@supabase/supabase-js');
 
-// Supabase configuration
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Create Supabase client with anon key (for client-side operations)
-const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: false,
-    detectSessionInUrl: false
+// Check if we're in development and provide helpful error messages
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Missing Supabase environment variables!');
+  console.error('Please set the following in your backend/config.env file:');
+  console.error('- SUPABASE_URL=your_supabase_project_url');
+  console.error('- SUPABASE_ANON_KEY=your_supabase_anon_key');
+  console.error('- SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key');
+  console.error('');
+  console.error('You can find these values in your Supabase project settings > API');
+  
+  if (process.env.NODE_ENV === 'development') {
+    console.warn('⚠️  Running in development mode without Supabase connection');
+    // Create mock clients for development
+    const mockClient = {
+      auth: {
+        getSession: () => Promise.resolve({ data: { session: null }, error: new Error('Supabase not configured') }),
+        getUser: () => Promise.resolve({ data: { user: null }, error: new Error('Supabase not configured') }),
+        signOut: () => Promise.resolve({ error: null }),
+        signInWithPassword: () => Promise.resolve({ data: null, error: new Error('Supabase not configured') }),
+        signInWithOAuth: () => Promise.resolve({ data: null, error: new Error('Supabase not configured') }),
+        exchangeCodeForSession: () => Promise.resolve({ data: null, error: new Error('Supabase not configured') }),
+        resetPasswordForEmail: () => Promise.resolve({ error: null }),
+        updateUser: () => Promise.resolve({ error: null }),
+        refreshSession: () => Promise.resolve({ data: null, error: new Error('Supabase not configured') })
+      },
+      from: () => ({
+        select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: null, error: new Error('Supabase not configured') }) }) }),
+        insert: () => ({ select: () => Promise.resolve({ data: [], error: new Error('Supabase not configured') }) }),
+        update: () => ({ eq: () => ({ select: () => Promise.resolve({ data: null, error: new Error('Supabase not configured') }) }) }),
+        delete: () => ({ eq: () => Promise.resolve({ error: new Error('Supabase not configured') }) })
+      })
+    };
+    
+    module.exports = {
+      supabase: mockClient,
+      supabaseAdmin: mockClient
+    };
+    return;
+  } else {
+    throw new Error('Missing required Supabase environment variables');
   }
-});
-
-// Create Supabase admin client with service role key (for server-side operations)
-const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
-  }
-});
-
-// Validate configuration
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('❌ Missing Supabase configuration. Please check your environment variables.');
-  process.exit(1);
 }
 
-if (!supabaseServiceKey) {
-  console.warn('⚠️  Supabase service role key not found. Admin operations will be limited.');
-}
+// Regular client for user operations
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-console.log('✅ Supabase configuration loaded successfully');
+// Admin client for admin operations (if service key is available)
+const supabaseAdmin = supabaseServiceKey 
+  ? createClient(supabaseUrl, supabaseServiceKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    })
+  : null;
+
+console.log('✅ Supabase client initialized successfully');
 
 module.exports = {
   supabase,
-  supabaseAdmin,
-  supabaseUrl,
-  supabaseAnonKey,
-  supabaseServiceKey
-}; 
+  supabaseAdmin
+};
