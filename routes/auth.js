@@ -265,7 +265,8 @@ router.post('/login', [
           email: authData.user.email,
           full_name: authData.user.user_metadata?.full_name || authData.user.email.split('@')[0],
           phone: authData.user.user_metadata?.phone || null, // Extract phone from metadata
-          role: authData.user.user_metadata?.role || 'student' // Use role from metadata or default to student
+          role: authData.user.user_metadata?.role || 'student', // Use role from metadata or default to student
+          password_hash: 'oauth_user' // Placeholder for OAuth users
         })
         .select('*')
         .single();
@@ -483,6 +484,65 @@ router.get('/check-email', asyncHandler(async (req, res) => {
 }));
 
 /**
+ * @route   POST /api/auth/resend-confirmation
+ * @desc    Resend email confirmation for unconfirmed users
+ * @access  Public
+ */
+router.post('/resend-confirmation', [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email address')
+], asyncHandler(async (req, res) => {
+  // Check for validation errors
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { email } = req.body;
+
+  try {
+    // Check if user exists and is unconfirmed
+    const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.listUsers();
+    
+    if (authError) {
+      throw new AuthenticationError('Failed to check user status');
+    }
+
+    const user = authUser.users.find(u => u.email === email);
+    
+    if (!user) {
+      throw new ValidationError('No account found with this email address');
+    }
+
+    if (user.email_confirmed_at) {
+      throw new ValidationError('Email is already confirmed. Please try logging in.');
+    }
+
+    // Resend confirmation email
+    const { error: resendError } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'signup',
+      email: email,
+      options: {
+        redirectTo: `http://localhost:5173/auth/callback`
+      }
+    });
+
+    if (resendError) {
+      throw new AuthenticationError('Failed to resend confirmation email');
+    }
+
+    res.json({
+      success: true,
+      message: 'Confirmation email sent successfully. Please check your email.'
+    });
+  } catch (error) {
+    throw error;
+  }
+}));
+
+/**
  * @route   GET /api/auth/me
  * @desc    Get current user profile
  * @access  Private
@@ -504,7 +564,8 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
           email: req.user.email,
           full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
           phone: req.user.user_metadata?.phone || null,
-          role: req.user.user_metadata?.role || 'student'
+          role: req.user.user_metadata?.role || 'student',
+          password_hash: 'oauth_user' // Placeholder for OAuth users
         })
         .select('*')
         .single();
@@ -590,6 +651,7 @@ router.put('/me', authMiddleware, [
           full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
           phone: req.user.user_metadata?.phone || null, // Extract phone from metadata
           role: req.user.user_metadata?.role || 'student', // Use role from metadata or default to student
+          password_hash: null, // OAuth users don't have password hashes
           ...updates // Include any updates in the initial creation
         })
         .select()

@@ -32,6 +32,15 @@ class NotFoundError extends Error {
   }
 }
 
+class DatabaseError extends Error {
+  constructor(message, details = null) {
+    super(message);
+    this.name = 'DatabaseError';
+    this.statusCode = 500;
+    this.details = details;
+  }
+}
+
 // Async handler wrapper
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -83,6 +92,7 @@ module.exports = {
   AuthenticationError,
   AuthorizationError,
   NotFoundError,
+  DatabaseError,
   asyncHandler,
   errorHandler
 };

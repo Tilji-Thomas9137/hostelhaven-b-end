@@ -20,6 +20,8 @@ const roomsRoutes = require('./routes/rooms');
 const notificationsRoutes = require('./routes/notifications');
 const adminRoutes = require('./routes/admin');
 const roomAllocationsRoutes = require('./routes/room-allocations');
+const roomAllocationRoutes = require('./routes/room-allocation');
+const operationsRoutes = require('./routes/operations');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
@@ -48,27 +50,31 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
-  message: {
-    error: 'Too many requests from this IP, please try again later.',
-    retryAfter: Math.ceil(parseInt(process.env.RATE_LIMIT_WINDOW_MS) / 1000 / 60)
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// Rate limiting (enabled only in production to avoid interfering with local dashboards)
+let limiter;
+let speedLimiter;
+if (process.env.NODE_ENV === 'production') {
+  limiter = rateLimit({
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60 * 1000, // 1 minute
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
+    message: {
+      error: 'Too many requests from this IP, please try again later.',
+      retryAfter: Math.ceil((parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000) / 1000 / 60)
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => req.path === '/api/auth/me'
+  });
 
-// Speed limiting
-const speedLimiter = slowDown({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  delayAfter: 50, // allow 50 requests per 15 minutes, then...
-  delayMs: () => 500 // begin adding 500ms of delay per request above 50
-});
+  speedLimiter = slowDown({
+    windowMs: 15 * 60 * 1000,
+    delayAfter: 200, // higher threshold in production
+    delayMs: () => 250
+  });
 
-app.use(limiter);
-app.use(speedLimiter);
+  app.use(limiter);
+  app.use(speedLimiter);
+}
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -109,6 +115,8 @@ app.use('/api/rooms', roomsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/room-allocations', roomAllocationsRoutes);
+app.use('/api/room-allocation', roomAllocationRoutes);
+app.use('/api/operations', operationsRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

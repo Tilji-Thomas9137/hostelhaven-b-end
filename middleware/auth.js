@@ -14,8 +14,19 @@ const authMiddleware = async (req, res, next) => {
     // Verify the token with Supabase
     const { data: { user }, error } = await supabase.auth.getUser(token);
 
-    if (error || !user) {
-      throw new AuthenticationError('Invalid or expired token');
+    if (error) {
+      // Handle specific error cases
+      if (error.message.includes('JWT expired') || error.message.includes('expired')) {
+        throw new AuthenticationError('Session has expired. Please log in again.');
+      } else if (error.message.includes('Invalid JWT') || error.message.includes('invalid')) {
+        throw new AuthenticationError('Invalid token. Please log in again.');
+      } else {
+        throw new AuthenticationError('Authentication failed: ' + error.message);
+      }
+    }
+
+    if (!user) {
+      throw new AuthenticationError('User not found. Please log in again.');
     }
 
     // Attach user to request object

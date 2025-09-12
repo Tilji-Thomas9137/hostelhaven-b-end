@@ -8,24 +8,45 @@ const router = express.Router();
 // Get all room allocations
 router.get('/', authMiddleware, async (req, res, next) => {
   try {
-    const { data: allocations, error } = await supabase
-      .from('room_assignments')
-      .select(`
-        *,
-        users(full_name, email, phone),
-        rooms(room_number, floor, room_type, capacity),
-        hostels(name)
-      `)
+    // Step 1: Fetch allocations without embedding to avoid relationship ambiguity
+    const { data: allocations, error: allocationsError } = await supabase
+      .from('room_allocations')
+      .select('id, user_id, room_id, status, allocated_at, ended_at, created_at')
       .order('created_at', { ascending: false });
 
-    if (error) {
+    if (allocationsError) {
       throw new ValidationError('Failed to fetch room allocations');
     }
 
-    res.json({
-      success: true,
-      data: allocations
-    });
+    const list = allocations || [];
+
+    if (list.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // Step 2: Batch fetch related users and rooms
+    const userIds = Array.from(new Set(list.map(a => a.user_id).filter(Boolean)));
+    const roomIds = Array.from(new Set(list.map(a => a.room_id).filter(Boolean)));
+
+    const [{ data: users }, { data: rooms }] = await Promise.all([
+      userIds.length
+        ? supabase.from('users').select('id, full_name, email').in('id', userIds)
+        : Promise.resolve({ data: [] }),
+      roomIds.length
+        ? supabase.from('rooms').select('id, room_number, floor, room_type').in('id', roomIds)
+        : Promise.resolve({ data: [] })
+    ]);
+
+    const userMap = new Map((users || []).map(u => [u.id, u]));
+    const roomMap = new Map((rooms || []).map(r => [r.id, r]));
+
+    const enriched = list.map(a => ({
+      ...a,
+      users: userMap.get(a.user_id) || null,
+      rooms: roomMap.get(a.room_id) || null
+    }));
+
+    res.json({ success: true, data: enriched });
   } catch (error) {
     next(error);
   }
@@ -58,10 +79,7 @@ router.get('/available-rooms', authMiddleware, async (req, res, next) => {
   try {
     const { data: rooms, error } = await supabase
       .from('rooms')
-      .select(`
-        *,
-        hostels(name)
-      `)
+      .select('*')
       .eq('status', 'available')
       .lt('occupied', 'capacity');
 
@@ -172,12 +190,7 @@ router.post('/', authMiddleware, async (req, res, next) => {
     // Get the complete allocation data
     const { data: completeAllocation, error: fetchError } = await supabase
       .from('room_assignments')
-      .select(`
-        *,
-        users(full_name, email, phone),
-        rooms(room_number, floor, room_type, capacity),
-        hostels(name)
-      `)
+      .select('*')
       .eq('id', allocation.id)
       .single();
 
@@ -282,11 +295,7 @@ router.get('/student/:student_id', authMiddleware, async (req, res, next) => {
 
     const { data: allocations, error } = await supabase
       .from('room_assignments')
-      .select(`
-        *,
-        rooms(room_number, floor, room_type),
-        hostels(name)
-      `)
+      .select('*')
       .eq('user_id', student_id)
       .order('start_date', { ascending: false });
 
