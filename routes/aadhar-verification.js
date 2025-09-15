@@ -30,6 +30,18 @@ router.post('/verify', upload.single('aadharImage'), asyncHandler(async (req, re
   const { fullName } = req.body;
   const file = req.file;
 
+  // Fail fast only if neither Gemini nor OpenRouter keys are configured
+  const hasGeminiKey = (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim())
+    || (process.env.GOOGLE_API_KEY && process.env.GOOGLE_API_KEY.trim())
+    || (process.env.GOOGLE_GEMINI_API_KEY && process.env.GOOGLE_GEMINI_API_KEY.trim());
+  const hasOpenRouterKey = process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim();
+  if (!hasGeminiKey && !hasOpenRouterKey) {
+    return res.status(503).json({
+      success: false,
+      message: 'Aadhar verification temporarily unavailable. No AI provider configured on server.',
+    });
+  }
+
   if (!file) {
     return res.status(400).json({
       success: false,
@@ -48,7 +60,9 @@ router.post('/verify', upload.single('aadharImage'), asyncHandler(async (req, re
     // Extract information from Aadhar card using Gemini AI
     const extractedInfo = await extractAadharInfo(file.buffer, file.mimetype);
 
-    if (!extractedInfo.aadharNumber || !extractedInfo.name) {
+    // Accept if we have at least a valid 12-digit Aadhar number; name is optional
+    const isValidAadhar = extractedInfo.aadharNumber && /^\d{12}$/.test(String(extractedInfo.aadharNumber));
+    if (!isValidAadhar) {
       return res.status(400).json({
         success: false,
         message: 'Could not extract Aadhar information from the image. Please ensure the image is clear and readable.',
@@ -57,7 +71,7 @@ router.post('/verify', upload.single('aadharImage'), asyncHandler(async (req, re
     }
 
     // Verify name match
-    const nameMatch = verifyNameMatch(fullName, extractedInfo.name);
+    const nameMatch = extractedInfo.name ? verifyNameMatch(fullName, extractedInfo.name) : false;
     const confidence = extractedInfo.confidence;
 
     // Check if Aadhar number already exists in database
@@ -88,7 +102,7 @@ router.post('/verify', upload.single('aadharImage'), asyncHandler(async (req, re
       message: 'Aadhar verification completed',
       extractedInfo: {
         aadharNumber: extractedInfo.aadharNumber,
-        name: extractedInfo.name,
+        name: extractedInfo.name || null,
         confidence: confidence
       },
       verification: {
@@ -99,6 +113,28 @@ router.post('/verify', upload.single('aadharImage'), asyncHandler(async (req, re
 
   } catch (error) {
     console.error('Aadhar verification error:', error);
+    // Map known Gemini key issues to clearer HTTP statuses
+    if (error.code === 'GEMINI_API_KEY_MISSING') {
+      return res.status(503).json({
+        success: false,
+        message: 'Aadhar verification temporarily unavailable. Server missing Gemini API key.',
+        error: error.message
+      });
+    }
+    if (error.code === 'GEMINI_API_KEY_INVALID') {
+      return res.status(503).json({
+        success: false,
+        message: 'Aadhar verification temporarily unavailable. Gemini API key invalid on server.',
+        error: error.message
+      });
+    }
+    if (error.code === 'AI_JSON_PARSE_FAILED') {
+      return res.status(502).json({
+        success: false,
+        message: 'Aadhar parsing failed. Please try a clearer image.',
+        error: error.message
+      });
+    }
     res.status(500).json({
       success: false,
       message: 'Failed to verify Aadhar card. Please try again.',

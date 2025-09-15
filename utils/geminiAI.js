@@ -1,7 +1,16 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Tesseract = require('tesseract.js');
 
-// Initialize Gemini AI
-const genAI = new GoogleGenerativeAI('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');
+// Initialize Gemini AI using env var; don't hardcode keys
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
+let genAI = null;
+if (GEMINI_API_KEY && typeof GEMINI_API_KEY === 'string' && GEMINI_API_KEY.trim().length > 0) {
+  genAI = new GoogleGenerativeAI(GEMINI_API_KEY.trim());
+}
+
+// OpenRouter fallback provider
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY; // allow common var
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-4-maverick:free';
 
 /**
  * Extract Aadhar number and name from Aadhar card image using Gemini AI
@@ -10,13 +19,8 @@ const genAI = new GoogleGenerativeAI('sk-or-v1-6e37cc2ef812b7e1fc9c24fc649e2a826
  * @returns {Promise<{aadharNumber: string, name: string, confidence: number}>}
  */
 async function extractAadharInfo(imageBuffer, mimeType) {
-  try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    
-    // Convert buffer to base64
-    const base64Image = imageBuffer.toString('base64');
-    
-    const prompt = `
+  const base64Image = imageBuffer.toString('base64');
+  const prompt = `
     Analyze this Aadhar card image and extract the following information:
     1. Aadhar number (12-digit number)
     2. Full name as written on the card
@@ -31,33 +35,172 @@ async function extractAadharInfo(imageBuffer, mimeType) {
     
     If you cannot extract any information, set the value to null and confidence to 0.
     Only return the JSON response, no additional text.
-    `;
+  `;
 
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: base64Image,
-          mimeType: mimeType
-        }
+  const parseJsonStrict = (text) => {
+    const cleaned = String(text)
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch (_) {
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (match) {
+        return JSON.parse(match[0]);
       }
-    ]);
+      const parseErr = new Error('AI response was not valid JSON');
+      parseErr.code = 'AI_JSON_PARSE_FAILED';
+      throw parseErr;
+    }
+  };
 
-    const response = await result.response;
-    const text = response.text();
-    
-    // Parse the JSON response
-    const extractedData = JSON.parse(text);
-    
-    return {
-      aadharNumber: extractedData.aadharNumber || null,
-      name: extractedData.name || null,
-      confidence: extractedData.confidence || 0
-    };
-    
-  } catch (error) {
-    console.error('Error extracting Aadhar info:', error);
-    throw new Error('Failed to extract Aadhar information');
+  // Decide provider order. Prefer OpenRouter by default; allow forcing via AI_PROVIDER
+  const providers = [];
+  const providerPref = (process.env.AI_PROVIDER || '').toLowerCase();
+  if (providerPref === 'openrouter') {
+    if (OPENROUTER_API_KEY) providers.push('openrouter');
+  } else if (providerPref === 'gemini') {
+    if (genAI) providers.push('gemini');
+  } else {
+    // Default preference: OpenRouter first, then Gemini
+    if (OPENROUTER_API_KEY) providers.push('openrouter');
+    if (genAI) providers.push('gemini');
+  }
+  if (providers.length === 0) {
+    const err = new Error('No AI provider configured. Set GEMINI_API_KEY or OPENROUTER_API_KEY');
+    err.code = 'NO_AI_PROVIDER';
+    throw err;
+  }
+
+  let lastError = null;
+  for (const provider of providers) {
+    try {
+      if (provider === 'gemini') {
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const result = await model.generateContent([
+          prompt,
+          { inlineData: { data: base64Image, mimeType } }
+        ]);
+        const response = await result.response;
+        const text = response.text();
+        const extractedData = parseJsonStrict(text);
+        return {
+          aadharNumber: extractedData.aadharNumber || null,
+          name: extractedData.name || null,
+          confidence: extractedData.confidence || 0
+        };
+      }
+
+      if (provider === 'openrouter') {
+        const dataUrl = `data:${mimeType};base64,${base64Image}`;
+        const system = 'You extract structured data from Indian Aadhar card images. Return ONLY strict JSON with keys: aadharNumber (12 digits as string), name (string), confidence (0-100). If unsure, set missing fields to null and confidence to 0.';
+        const userPrompt = `Analyze this Aadhar card image and extract JSON. Image (data URL): ${dataUrl}`;
+
+        const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'HTTP-Referer': 'http://localhost',
+            'X-Title': 'HostelHaven Aadhar Verification'
+          },
+          body: JSON.stringify({
+            model: OPENROUTER_MODEL,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: userPrompt }
+            ],
+            temperature: 0
+          })
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          const e = new Error(`OpenRouter request failed: ${resp.status} ${text}`);
+          e.code = 'OPENROUTER_REQUEST_FAILED';
+          throw e;
+        }
+        const json = await resp.json();
+        const content = json?.choices?.[0]?.message?.content || '';
+        const extracted = parseJsonStrict(content);
+        return {
+          aadharNumber: extracted.aadharNumber || null,
+          name: extracted.name || null,
+          confidence: extracted.confidence || 0
+        };
+      }
+    } catch (error) {
+      lastError = error;
+      // If Gemini key invalid/missing, try next provider if available
+      if (
+        provider === 'gemini' &&
+        (error.code === 'GEMINI_API_KEY_MISSING' ||
+         error.code === 'GEMINI_API_KEY_INVALID' ||
+         (error.status === 400 && /API key not valid/i.test(error.message || '')))
+      ) {
+        continue;
+      }
+      // On JSON parse failure, do not try next as content likely unusable for this provider
+      if (error.code === 'AI_JSON_PARSE_FAILED') {
+        throw error;
+      }
+      // Otherwise try next provider
+      continue;
+    }
+  }
+
+  // If all providers failed
+  // OCR fallback using Tesseract
+  try {
+    // Pass 1: general OCR
+    const { data: { text } } = await Tesseract.recognize(imageBuffer, 'eng', {
+      logger: () => {},
+    });
+    // Pass 2: digits-focused OCR to improve number capture
+    const { data: { text: digitsText } } = await Tesseract.recognize(imageBuffer, 'eng', {
+      logger: () => {},
+      tessedit_char_whitelist: '0123456789',
+      classify_bln_numeric_mode: 1
+    });
+
+    const onlyDigits = (s) => (s || '').replace(/\D/g, '');
+    const combinedDigits = onlyDigits(`${text}\n${digitsText}`);
+    const aadharMatch = combinedDigits.match(/\d{12}/);
+
+    // Name heuristic: look for lines near keywords
+    const lines = String(text).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    let nameCandidate = null;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (/name\b/i.test(l)) {
+        // Try the part after ':' or the next line
+        const after = l.split(':')[1]?.trim();
+        if (after && after.length >= 3) { nameCandidate = after; break; }
+        if (lines[i+1] && lines[i+1].length >= 3) { nameCandidate = lines[i+1]; break; }
+      }
+    }
+    // Fallback: pick the longest uppercase-like line
+    if (!nameCandidate) {
+      const upperish = lines.filter(l => /^(?:[A-Z][A-Z\s\.]*)$/.test(l) && l.length >= 5);
+      if (upperish.length) {
+        nameCandidate = upperish.sort((a,b)=>b.length-a.length)[0];
+      }
+    }
+    if (aadharMatch) {
+      return {
+        aadharNumber: aadharMatch[0],
+        name: nameCandidate || null,
+        confidence: nameCandidate ? 60 : 40
+      };
+    }
+    const generic = new Error('Failed to extract Aadhar information');
+    generic.cause = lastError;
+    throw generic;
+  } catch (ocrErr) {
+    const generic = new Error('Failed to extract Aadhar information');
+    generic.cause = ocrErr;
+    throw generic;
   }
 }
 

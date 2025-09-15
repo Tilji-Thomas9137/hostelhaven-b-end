@@ -456,13 +456,13 @@ router.get('/users', authMiddleware, adminMiddleware, [
 
   const { limit = 20, offset = 0, search = '', role = '' } = req.query;
 
+  // Fetch base users and profile in one go. Avoid implicit relationships to rooms/hostels
+  // because the DB may not have FKs defined for PostgREST to infer.
   let query = supabase
     .from('users')
     .select(`
       *,
-      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status),
-      rooms:rooms(id, room_number, floor, room_type, capacity, occupied),
-      hostels:hostels(id, name)
+      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status)
     `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
@@ -472,7 +472,7 @@ router.get('/users', authMiddleware, adminMiddleware, [
     query = query.or(`full_name.ilike.%${search}%,email.ilike.%${search}%`);
   }
 
-  // Apply role filter
+  // Apply role filter (default to students if explicitly requested by frontend)
   if (role) {
     query = query.eq('role', role);
   }
@@ -488,9 +488,43 @@ router.get('/users', authMiddleware, adminMiddleware, [
     });
   }
 
-  // Process user data (keep as-is, relations included for frontend)
-  const usersWithStatus = (students || []).map(user => ({
-    ...user
+  // Manually load rooms and hostels in separate queries and stitch results
+  const users = students || [];
+  const roomIds = Array.from(new Set(users.map(u => u.room_id).filter(Boolean)));
+  const hostelIds = Array.from(new Set(users.map(u => u.hostel_id).filter(Boolean)));
+
+  let roomsById = {};
+  if (roomIds.length > 0) {
+    const { data: rooms, error: roomsError } = await supabase
+      .from('rooms')
+      .select('id, room_number, floor, room_type, capacity, occupied, rent_amount')
+      .in('id', roomIds);
+    if (!roomsError && rooms) {
+      roomsById = rooms.reduce((acc, r) => { acc[r.id] = r; return acc; }, {});
+    } else if (roomsError) {
+      console.warn('Warning: could not load rooms for users:', roomsError.message);
+    }
+  }
+
+  let hostelsById = {};
+  if (hostelIds.length > 0) {
+    const { data: hostels, error: hostelsError } = await supabase
+      .from('hostels')
+      .select('id, name')
+      .in('id', hostelIds);
+    if (!hostelsError && hostels) {
+      hostelsById = hostels.reduce((acc, h) => { acc[h.id] = h; return acc; }, {});
+    } else if (hostelsError) {
+      console.warn('Warning: could not load hostels for users:', hostelsError.message);
+    }
+  }
+
+  const usersWithStatus = users.map(user => ({
+    ...user,
+    rooms: user.room_id ? roomsById[user.room_id] || null : null,
+    hostels: user.hostel_id ? hostelsById[user.hostel_id] || null : null,
+    roomNumber: user.room_id && roomsById[user.room_id] ? roomsById[user.room_id].room_number : 'Not Assigned',
+    hostelName: user.hostel_id && hostelsById[user.hostel_id] ? hostelsById[user.hostel_id].name : 'Not Assigned'
   }));
 
   res.json({

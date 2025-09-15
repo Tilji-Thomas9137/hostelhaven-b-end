@@ -348,16 +348,21 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
   const { id } = req.params;
   const { room_id } = req.body;
 
-  // Check if request exists and is pending
+  // Get the request first (avoid filtering by status in the query to prevent false negatives)
   const { data: request, error: requestError } = await supabase
     .from('room_requests')
     .select('*')
     .eq('id', id)
-    .eq('status', 'pending')
     .single();
 
   if (requestError || !request) {
-    throw new ValidationError('Room request not found or not pending');
+    throw new ValidationError('Room request not found');
+  }
+
+  // Validate current status (allow recovery if request shows allocated but user/allocation not synced)
+  const isRequestApprovable = ['pending', 'waitlisted'].includes(request.status) || request.status === 'allocated';
+  if (!isRequestApprovable) {
+    throw new ValidationError(`Room request is not approvable (current status: ${request.status})`);
   }
 
   // Check if room is available
@@ -365,11 +370,10 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
     .from('rooms')
     .select('*')
     .eq('id', room_id)
-    .eq('status', 'available')
     .single();
 
   if (roomError || !room) {
-    throw new ValidationError('Room not found or not available');
+    throw new ValidationError('Room not found');
   }
 
   // Check if room has capacity
@@ -378,21 +382,20 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
     throw new ValidationError('Room is at full capacity');
   }
 
-  // Update request status to allocated
-  const { data: updatedRequest, error: updateError } = await supabase
-    .from('room_requests')
-    .update({
-      status: 'allocated',
-      allocated_room_id: room_id,
-      allocated_at: new Date().toISOString(),
-      allocated_by: req.user.id
-    })
-    .eq('id', id)
-    .select()
+  // If already has an active allocation, short-circuit success
+  const { data: activeAlloc, error: activeAllocErr } = await supabase
+    .from('room_assignments')
+    .select('*')
+    .eq('user_id', request.user_id)
+    .eq('is_active', true)
     .single();
 
-  if (updateError) {
-    throw new ValidationError('Failed to approve room request');
+  if (!activeAllocErr && activeAlloc) {
+    return res.json({
+      success: true,
+      message: 'Room request already allocated',
+      data: { request }
+    });
   }
 
   // Use the sync function to update all tables atomically
@@ -406,7 +409,83 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
 
   if (syncError) {
     console.error('Failed to sync allocation tables:', syncError);
-    throw new ValidationError('Failed to complete room allocation');
+    // Fallback manual sync to recover when DB function is out-of-date
+    // 1) Ensure no active allocation
+    const { data: existingAllocation, error: checkError } = await supabase
+      .from('room_assignments')
+      .select('*')
+      .eq('user_id', request.user_id)
+      .eq('is_active', true)
+      .single();
+    if (checkError && checkError.code !== 'PGRST116') {
+      throw new ValidationError('Failed to check existing allocation');
+    }
+    if (!existingAllocation) {
+      const { data: allocation, error: allocationError } = await supabase
+        .from('room_assignments')
+        .insert({
+          user_id: request.user_id,
+          room_id: room_id,
+          hostel_id: null,
+          start_date: new Date().toISOString().slice(0, 10),
+          is_active: true
+        })
+        .select()
+        .single();
+      if (allocationError) {
+        throw new ValidationError('Failed to create room allocation');
+      }
+    }
+
+    // 2) Update user
+    const { error: updateUserError } = await supabase
+      .from('users')
+      .update({ room_id: room_id })
+      .eq('id', request.user_id);
+    if (updateUserError) {
+      throw new ValidationError('Failed to update student room assignment');
+    }
+
+    // 3) Update room occupancy/status
+    const { data: currentRoom } = await supabase
+      .from('rooms')
+      .select('occupied, capacity')
+      .eq('id', room_id)
+      .single();
+    const newOccupiedManual = Math.max(0, (currentRoom?.occupied || 0) + 1);
+    await supabase
+      .from('rooms')
+      .update({
+        occupied: newOccupiedManual,
+        status: newOccupiedManual >= room.capacity ? 'occupied' : 'available'
+      })
+      .eq('id', room_id);
+  }
+
+  // Update room occupancy/status defensively in case trigger/function didn't adjust
+  const newOccupied = (room.occupied || 0) + 1;
+  await supabase
+    .from('rooms')
+    .update({ 
+      occupied: newOccupied,
+      status: newOccupied >= room.capacity ? 'occupied' : 'available'
+    })
+    .eq('id', room_id);
+
+  // Finally set request to allocated if not already
+  if (request.status !== 'allocated' || request.allocated_room_id !== room_id) {
+    const { error: finalUpdateError } = await supabase
+      .from('room_requests')
+      .update({
+        status: 'allocated',
+        allocated_room_id: room_id,
+        allocated_at: new Date().toISOString(),
+        allocated_by: req.user.id
+      })
+      .eq('id', id);
+    if (finalUpdateError) {
+      console.warn('Warning: request update post-sync failed:', finalUpdateError.message);
+    }
   }
 
   res.json({

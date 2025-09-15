@@ -29,7 +29,7 @@ const authMiddleware = async (req, res, next) => {
       throw new AuthenticationError('User not found. Please log in again.');
     }
 
-    // Check if user is suspended
+    // Check if user is suspended (allow missing profile to pass so /api/auth/me can create it)
     const { data: userProfile, error: profileError } = await supabase
       .from('users')
       .select('status')
@@ -37,8 +37,16 @@ const authMiddleware = async (req, res, next) => {
       .single();
 
     if (profileError) {
-      console.error('Error fetching user status:', profileError);
-      throw new AuthenticationError('Unable to verify user status');
+      // Allow through if no profile exists yet (PGRST116 or equivalent message)
+      const isNoRows = profileError.code === 'PGRST116' ||
+        (typeof profileError.message === 'string' && (
+          profileError.message.includes('No rows') ||
+          profileError.message.includes('multiple (or no) rows returned')
+        ));
+      if (!isNoRows) {
+        console.error('Error fetching user status:', profileError);
+        throw new AuthenticationError('Unable to verify user status');
+      }
     }
 
     if (userProfile?.status === 'suspended') {

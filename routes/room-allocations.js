@@ -21,7 +21,7 @@ router.get('/', authMiddleware, async (req, res, next) => {
     const list = allocations || [];
 
     if (list.length === 0) {
-      return res.json({ success: true, data: [] });
+      return res.json({ success: true, data: { allocations: [] } });
     }
 
     // Step 2: Batch fetch related users and rooms
@@ -46,7 +46,7 @@ router.get('/', authMiddleware, async (req, res, next) => {
       rooms: roomMap.get(a.room_id) || null
     }));
 
-    res.json({ success: true, data: enriched });
+    res.json({ success: true, data: { allocations: enriched } });
   } catch (error) {
     next(error);
   }
