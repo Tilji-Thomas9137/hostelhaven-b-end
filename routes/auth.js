@@ -256,6 +256,11 @@ router.post('/login', [
       .eq('id', authData.user.id)
       .single();
 
+    // Check if user is suspended before proceeding
+    if (userProfile && userProfile.status === 'suspended') {
+      throw new AuthenticationError('Your account has been suspended. Please contact an administrator.');
+    }
+
     // If user profile doesn't exist, create it with default role as student
     if (profileError || !userProfile) {
       const { data: newProfile, error: createError } = await supabase

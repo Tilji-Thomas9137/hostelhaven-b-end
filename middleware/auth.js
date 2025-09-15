@@ -29,6 +29,22 @@ const authMiddleware = async (req, res, next) => {
       throw new AuthenticationError('User not found. Please log in again.');
     }
 
+    // Check if user is suspended
+    const { data: userProfile, error: profileError } = await supabase
+      .from('users')
+      .select('status')
+      .eq('id', user.id)
+      .single();
+
+    if (profileError) {
+      console.error('Error fetching user status:', profileError);
+      throw new AuthenticationError('Unable to verify user status');
+    }
+
+    if (userProfile?.status === 'suspended') {
+      throw new AuthenticationError('Your account has been suspended. Please contact an administrator.');
+    }
+
     // Attach user to request object
     req.user = user;
     next();

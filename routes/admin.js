@@ -331,7 +331,9 @@ router.get('/users', authMiddleware, adminMiddleware, [
     .from('users')
     .select(`
       *,
-      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status)
+      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status),
+      rooms:rooms(id, room_number, floor, room_type, capacity, occupied),
+      hostels:hostels(id, name)
     `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
@@ -352,14 +354,10 @@ router.get('/users', authMiddleware, adminMiddleware, [
     throw new ValidationError('Failed to fetch users');
   }
 
-  // Process user data
-  const usersWithStatus = (students || []).map(user => {
-    return {
-      ...user,
-      hostelName: user.hostel_id ? 'Assigned' : 'Not Assigned',
-      roomNumber: user.room_id ? 'Assigned' : 'Not Assigned'
-    };
-  });
+  // Process user data (keep as-is, relations included for frontend)
+  const usersWithStatus = (students || []).map(user => ({
+    ...user
+  }));
 
   res.json({
     success: true,
