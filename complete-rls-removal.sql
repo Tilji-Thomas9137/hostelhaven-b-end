@@ -63,3 +63,5 @@ ORDER BY tablename;
 SELECT 'RLS has been completely disabled on all tables' as status;
 SELECT 'All policies have been removed' as policies_removed;
 SELECT 'You can now save profiles without RLS restrictions' as next_step;
+
+

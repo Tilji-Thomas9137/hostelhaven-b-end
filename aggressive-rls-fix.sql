@@ -76,3 +76,5 @@ CREATE POLICY "service_role_bypass_users" ON users
 
 CREATE POLICY "allow_anon_users" ON users
     FOR ALL USING (auth.role() = 'anon');
+
+

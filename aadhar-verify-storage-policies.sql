@@ -36,3 +36,4 @@ FOR DELETE USING (
   bucket_id = 'aadhar_verify' 
   AND auth.role() = 'authenticated'
 );
+

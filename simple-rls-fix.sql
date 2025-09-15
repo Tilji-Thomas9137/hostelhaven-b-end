@@ -57,3 +57,4 @@ CREATE POLICY "admins_manage_all_profiles" ON user_profiles
             AND users.role IN ('admin', 'hostel_operations_assistant', 'warden')
         )
     );
+

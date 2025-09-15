@@ -59,3 +59,5 @@ FOR ALL USING (auth.role() = 'anon');
 -- Step 7: Show confirmation
 SELECT 'Aadhar storage policies created successfully' as status;
 SELECT 'Bucket: aadhar_verify is now public and accessible' as bucket_status;
+
+
