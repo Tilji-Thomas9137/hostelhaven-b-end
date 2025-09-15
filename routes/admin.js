@@ -112,44 +112,50 @@ router.get('/hostels', authMiddleware, adminMiddleware, [
     .from('hostels')
     .select(`
       *,
-      rooms(count),
-      users!users_hostel_id_fkey(count)
+      rooms(count)
     `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
 
   if (error) {
-    throw new ValidationError('Failed to fetch hostels');
+    console.error('Error fetching hostels:', error);
+    
+    // If hostels table doesn't exist, return empty array instead of error
+    if (error.code === '42P01') {
+      return res.json({
+        success: true,
+        data: {
+          hostels: [],
+          pagination: {
+            limit: parseInt(limit),
+            offset: parseInt(offset),
+            total: 0
+          }
+        }
+      });
+    }
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch hostels',
+      error: error.message
+    });
   }
 
-  // Calculate revenue for each hostel
-  const hostelsWithRevenue = await Promise.all(
-    hostels.map(async (hostel) => {
-      const { data: payments, error: paymentError } = await supabase
-        .from('payments')
-        .select('amount')
-        .eq('hostel_id', hostel.id)
-        .eq('status', 'paid');
-
-      const revenue = payments ? payments.reduce((sum, p) => sum + parseFloat(p.amount), 0) : 0;
-
-      return {
-        ...hostel,
-        revenue,
-        roomCount: hostel.rooms?.[0]?.count || 0,
-        studentCount: hostel.users?.[0]?.count || 0
-      };
-    })
-  );
+  // Process hostels data
+  const processedHostels = (hostels || []).map(hostel => ({
+    ...hostel,
+    roomCount: hostel.rooms?.[0]?.count || 0
+  }));
 
   res.json({
     success: true,
     data: {
-      hostels: hostelsWithRevenue,
+      hostels: processedHostels,
       pagination: {
         limit: parseInt(limit),
         offset: parseInt(offset),
-        total: hostelsWithRevenue.length
+        total: processedHostels.length
       }
     }
   });
@@ -163,6 +169,7 @@ router.get('/hostels', authMiddleware, adminMiddleware, [
 router.post('/hostels', authMiddleware, adminMiddleware, [
   body('name').trim().isLength({ min: 2, max: 255 }).withMessage('Name must be between 2 and 255 characters'),
   body('address').trim().isLength({ min: 5, max: 500 }).withMessage('Address must be between 5 and 500 characters'),
+  body('location').optional().trim().isLength({ max: 255 }).withMessage('Location must be less than 255 characters'),
   body('city').trim().isLength({ min: 2, max: 100 }).withMessage('City must be between 2 and 100 characters'),
   body('state').optional().trim().isLength({ max: 100 }),
   body('country').optional().trim().isLength({ max: 100 }),
@@ -176,13 +183,14 @@ router.post('/hostels', authMiddleware, adminMiddleware, [
     throw new ValidationError('Validation failed', errors.array());
   }
 
-  const { name, address, city, state, country, postal_code, phone, email, capacity } = req.body;
+  const { name, address, location, city, state, country, postal_code, phone, email, capacity } = req.body;
 
   const { data: hostel, error } = await supabase
     .from('hostels')
     .insert({
       name,
       address,
+      location,
       city,
       state,
       country,
@@ -203,6 +211,128 @@ router.post('/hostels', authMiddleware, adminMiddleware, [
     success: true,
     message: 'Hostel created successfully',
     data: { hostel }
+  });
+}));
+
+/**
+ * @route   PUT /api/admin/hostels/:id
+ * @desc    Update hostel
+ * @access  Private (Admin only)
+ */
+router.put('/hostels/:id', authMiddleware, adminMiddleware, [
+  body('name').optional().trim().isLength({ min: 2, max: 255 }).withMessage('Name must be between 2 and 255 characters'),
+  body('address').optional().trim().isLength({ min: 5, max: 500 }).withMessage('Address must be between 5 and 500 characters'),
+  body('location').optional().trim().isLength({ max: 255 }).withMessage('Location must be less than 255 characters'),
+  body('city').optional().trim().isLength({ min: 2, max: 100 }).withMessage('City must be between 2 and 100 characters'),
+  body('state').optional().trim().isLength({ max: 100 }),
+  body('pincode').optional().trim().isLength({ max: 10 }),
+  body('contact_phone').optional().trim().isLength({ max: 20 }),
+  body('contact_email').optional().isEmail().withMessage('Invalid email format'),
+  body('capacity').optional().isInt({ min: 1 }).withMessage('Capacity must be a positive integer'),
+  body('amenities').optional().isArray().withMessage('Amenities must be an array')
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { id } = req.params;
+  const updates = req.body;
+
+  // Remove undefined values
+  Object.keys(updates).forEach(key => {
+    if (updates[key] === undefined) {
+      delete updates[key];
+    }
+  });
+
+  const { data: hostel, error } = await supabase
+    .from('hostels')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error updating hostel:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update hostel',
+      error: error.message
+    });
+  }
+
+  if (!hostel) {
+    return res.status(404).json({
+      success: false,
+      message: 'Hostel not found'
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Hostel updated successfully',
+    data: { hostel }
+  });
+}));
+
+/**
+ * @route   DELETE /api/admin/hostels/:id
+ * @desc    Delete hostel
+ * @access  Private (Admin only)
+ */
+router.delete('/hostels/:id', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase
+    .from('hostels')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error deleting hostel:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete hostel',
+      error: error.message
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Hostel deleted successfully'
+  });
+}));
+
+/**
+ * @route   GET /api/admin/hostels/:id/rooms
+ * @desc    Get rooms for a specific hostel
+ * @access  Private (Admin only)
+ */
+router.get('/hostels/:id/rooms', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const { data: rooms, error } = await supabase
+    .from('rooms')
+    .select(`
+      *,
+      users(full_name, email)
+    `)
+    .eq('hostel_id', id)
+    .order('room_number', { ascending: true });
+
+  if (error) {
+    console.error('Error fetching hostel rooms:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch rooms',
+      error: error.message
+    });
+  }
+
+  res.json({
+    success: true,
+    data: { rooms: rooms || [] }
   });
 }));
 
@@ -228,7 +358,9 @@ router.get('/students', authMiddleware, adminMiddleware, [
     .from('users')
     .select(`
       *,
-      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status)
+      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status),
+      rooms:rooms(id, room_number, room_type, floor),
+      hostels:hostels(id, name)
     `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
@@ -244,23 +376,20 @@ router.get('/students', authMiddleware, adminMiddleware, [
   const { data: students, error } = await query;
 
   if (error) {
-    return res.json({
-      success: true,
-      data: {
-        students: [],
-        pagination: { limit: parseInt(limit), offset: parseInt(offset), total: 0 }
-      }
+    console.error('Error fetching students:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch students',
+      error: error.message
     });
   }
 
-  // Process user data
-  const usersWithStatus = (students || []).map(user => {
-    return {
-      ...user,
-      hostelName: user.hostel_id ? 'Assigned' : 'Not Assigned',
-      roomNumber: user.room_id ? 'Assigned' : 'Not Assigned'
-    };
-  });
+  // Process user data (null-safe when no room/hostel assigned)
+  const usersWithStatus = (students || []).map(user => ({
+    ...user,
+    hostelName: user.hostels?.name || 'Not assigned',
+    roomNumber: user.rooms?.room_number || 'Not assigned'
+  }));
 
   res.json({
     success: true,
@@ -349,7 +478,12 @@ router.get('/users', authMiddleware, adminMiddleware, [
   const { data: students, error } = await query;
 
   if (error) {
-    throw new ValidationError('Failed to fetch users');
+    console.error('Error fetching users:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch users',
+      error: error.message
+    });
   }
 
   // Process user data
