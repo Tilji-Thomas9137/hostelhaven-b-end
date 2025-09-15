@@ -105,11 +105,14 @@ router.get('/rooms', [
   }
 
   // Add availability info
-  const roomsWithAvailability = rooms.map(room => ({
-    ...room,
-    available_spots: room.capacity - room.occupied,
-    is_available: room.occupied < room.capacity && room.status === 'available'
-  }));
+  const roomsWithAvailability = rooms.map(room => {
+    const occupied = room.occupied || room.current_occupancy || 0;
+    return {
+      ...room,
+      available_spots: room.capacity - occupied,
+      is_available: occupied < room.capacity && room.status === 'available'
+    };
+  });
 
   res.json({
     success: true,
@@ -370,7 +373,8 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
   }
 
   // Check if room has capacity
-  if (room.occupied >= room.capacity) {
+  const currentOccupancy = room.occupied || room.current_occupancy || 0;
+  if (currentOccupancy >= room.capacity) {
     throw new ValidationError('Room is at full capacity');
   }
 
@@ -391,31 +395,18 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
     throw new ValidationError('Failed to approve room request');
   }
 
-  // Update room occupancy
-  const { error: roomUpdateError } = await supabase
-    .from('rooms')
-    .update({
-      occupied: room.occupied + 1,
-      status: room.occupied + 1 >= room.capacity ? 'occupied' : 'available'
-    })
-    .eq('id', room_id);
-
-  if (roomUpdateError) {
-    throw new ValidationError('Failed to update room occupancy');
-  }
-
-  // Create room allocation record
-  const { error: allocationError } = await supabase
-    .from('room_allocations')
-    .insert({
-      user_id: request.user_id,
-      room_id: room_id,
-      allocated_by: req.user.id,
-      allocation_type: 'manual'
+  // Use the sync function to update all tables atomically
+  const { data: syncResult, error: syncError } = await supabase
+    .rpc('sync_allocation_tables', {
+      p_user_id: request.user_id,
+      p_room_id: room_id,
+      p_allocated_by: req.user.id,
+      p_allocation_type: 'manual'
     });
 
-  if (allocationError) {
-    console.error('Failed to create allocation record:', allocationError);
+  if (syncError) {
+    console.error('Failed to sync allocation tables:', syncError);
+    throw new ValidationError('Failed to complete room allocation');
   }
 
   res.json({
@@ -707,6 +698,94 @@ router.delete('/request/:requestId', authMiddleware, asyncHandler(async (req, re
 }));
 
 /**
+ * @route   GET /api/room-allocation/room-options
+ * @desc    Get available room types and floors from database
+ * @access  Public
+ */
+router.get('/room-options', asyncHandler(async (req, res) => {
+  try {
+    console.log('Fetching room options...');
+    
+    // Get unique room types
+    const { data: roomTypes, error: typesError } = await supabase
+      .from('rooms')
+      .select('room_type')
+      .not('room_type', 'is', null);
+
+    console.log('Room types query result:', { roomTypes, typesError });
+
+    if (typesError) {
+      console.error('Error fetching room types:', typesError);
+      throw new ValidationError('Failed to fetch room types');
+    }
+
+    // Get unique floors
+    const { data: floors, error: floorsError } = await supabase
+      .from('rooms')
+      .select('floor')
+      .not('floor', 'is', null);
+
+    console.log('Floors query result:', { floors, floorsError });
+
+    if (floorsError) {
+      console.error('Error fetching floors:', floorsError);
+      throw new ValidationError('Failed to fetch floors');
+    }
+
+    // Process unique values
+    const uniqueRoomTypes = [...new Set(roomTypes.map(room => room.room_type))];
+    const uniqueFloors = [...new Set(floors.map(room => room.floor))].sort((a, b) => a - b);
+
+    console.log('Processed unique values:', { uniqueRoomTypes, uniqueFloors });
+
+    // If no room types found, provide default options
+    let finalRoomTypes = uniqueRoomTypes;
+    let finalFloors = uniqueFloors;
+    
+    if (uniqueRoomTypes.length === 0) {
+      console.log('No room types found in database, providing default options');
+      finalRoomTypes = ['standard', 'deluxe', 'premium', 'suite'];
+      finalFloors = [1, 2, 3, 4, 5];
+    }
+
+    // Add descriptions for room types
+    const roomTypesWithDescriptions = finalRoomTypes.map(type => ({
+      value: type,
+      label: type.charAt(0).toUpperCase() + type.slice(1),
+      description: getRoomTypeDescription(type)
+    }));
+
+    console.log('Final response data:', {
+      room_types: roomTypesWithDescriptions,
+      floors: finalFloors
+    });
+
+    res.json({
+      success: true,
+      data: {
+        room_types: roomTypesWithDescriptions,
+        floors: finalFloors
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching room options:', error);
+    throw new ValidationError('Failed to fetch room options');
+  }
+}));
+
+// Helper function to get room type descriptions
+function getRoomTypeDescription(type) {
+  const descriptions = {
+    'standard': 'Basic room with shared facilities',
+    'deluxe': 'Enhanced room with better amenities',
+    'premium': 'Luxury room with premium features',
+    'suite': 'Spacious suite with private facilities',
+    'economy': 'Budget-friendly room with essential amenities'
+  };
+  return descriptions[type] || 'Room with standard amenities';
+}
+
+/**
  * @route   GET /api/room-allocation/statistics
  * @desc    Get room allocation statistics
  * @access  Private (Admin only)
@@ -733,8 +812,11 @@ router.get('/statistics', authMiddleware, adminMiddleware, asyncHandler(async (r
   // Calculate statistics
   const totalRooms = roomStats.length;
   const totalCapacity = roomStats.reduce((sum, room) => sum + room.capacity, 0);
-  const totalOccupied = roomStats.reduce((sum, room) => sum + room.occupied, 0);
-  const availableRooms = roomStats.filter(room => room.status === 'available' && room.occupied < room.capacity).length;
+  const totalOccupied = roomStats.reduce((sum, room) => sum + (room.occupied || room.current_occupancy || 0), 0);
+  const availableRooms = roomStats.filter(room => {
+    const occupied = room.occupied || room.current_occupancy || 0;
+    return room.status === 'available' && occupied < room.capacity;
+  }).length;
 
   const pendingRequests = requestStats.filter(req => req.status === 'pending').length;
   const waitlistedRequests = requestStats.filter(req => req.status === 'waitlisted').length;

@@ -121,9 +121,11 @@ ALTER TABLE allocation_batches ENABLE ROW LEVEL SECURITY;
 
 -- RLS POLICIES
 -- Rooms: Anyone can view, only admins can manage
+DROP POLICY IF EXISTS "Anyone can view rooms" ON rooms;
 CREATE POLICY "Anyone can view rooms" ON rooms
     FOR SELECT USING (true);
 
+DROP POLICY IF EXISTS "Admins can manage rooms" ON rooms;
 CREATE POLICY "Admins can manage rooms" ON rooms
     FOR ALL USING (
         EXISTS (
@@ -134,15 +136,19 @@ CREATE POLICY "Admins can manage rooms" ON rooms
     );
 
 -- Room requests: Users can manage their own, admins can manage all
+DROP POLICY IF EXISTS "Users can view their own requests" ON room_requests;
 CREATE POLICY "Users can view their own requests" ON room_requests
     FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can create their own requests" ON room_requests;
 CREATE POLICY "Users can create their own requests" ON room_requests
     FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can update their own requests" ON room_requests;
 CREATE POLICY "Users can update their own requests" ON room_requests
     FOR UPDATE USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Admins can manage all requests" ON room_requests;
 CREATE POLICY "Admins can manage all requests" ON room_requests
     FOR ALL USING (
         EXISTS (
@@ -153,9 +159,11 @@ CREATE POLICY "Admins can manage all requests" ON room_requests
     );
 
 -- Room allocations: Users can view their own, admins can manage all
+DROP POLICY IF EXISTS "Users can view their own allocations" ON room_allocations;
 CREATE POLICY "Users can view their own allocations" ON room_allocations
     FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Admins can manage all allocations" ON room_allocations;
 CREATE POLICY "Admins can manage all allocations" ON room_allocations
     FOR ALL USING (
         EXISTS (
@@ -166,9 +174,11 @@ CREATE POLICY "Admins can manage all allocations" ON room_allocations
     );
 
 -- Waitlist: Users can view their own, admins can manage all
+DROP POLICY IF EXISTS "Users can view their own waitlist" ON room_waitlist;
 CREATE POLICY "Users can view their own waitlist" ON room_waitlist
     FOR SELECT USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Admins can manage all waitlist" ON room_waitlist;
 CREATE POLICY "Admins can manage all waitlist" ON room_waitlist
     FOR ALL USING (
         EXISTS (
@@ -179,6 +189,7 @@ CREATE POLICY "Admins can manage all waitlist" ON room_waitlist
     );
 
 -- Allocation batches: Only admins can manage
+DROP POLICY IF EXISTS "Admins can manage allocation batches" ON allocation_batches;
 CREATE POLICY "Admins can manage allocation batches" ON allocation_batches
     FOR ALL USING (
         EXISTS (
@@ -188,16 +199,29 @@ CREATE POLICY "Admins can manage allocation batches" ON allocation_batches
         )
     );
 
+-- FUNCTION FOR UPDATING TIMESTAMPS
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
 -- TRIGGERS FOR UPDATING TIMESTAMPS
+DROP TRIGGER IF EXISTS update_rooms_updated_at ON rooms;
 CREATE TRIGGER update_rooms_updated_at BEFORE UPDATE ON rooms
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_room_requests_updated_at ON room_requests;
 CREATE TRIGGER update_room_requests_updated_at BEFORE UPDATE ON room_requests
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_room_allocations_updated_at ON room_allocations;
 CREATE TRIGGER update_room_allocations_updated_at BEFORE UPDATE ON room_allocations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_room_waitlist_updated_at ON room_waitlist;
 CREATE TRIGGER update_room_waitlist_updated_at BEFORE UPDATE ON room_waitlist
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
@@ -257,11 +281,11 @@ BEGIN
         r.room_type,
         r.floor,
         r.capacity,
-        r.occupied,
-        (r.capacity - r.occupied) as available_spots
+        COALESCE(r.occupied, r.current_occupancy, 0) as occupied,
+        (r.capacity - COALESCE(r.occupied, r.current_occupancy, 0)) as available_spots
     FROM rooms r
     WHERE r.status = 'available'
-    AND r.occupied < r.capacity
+    AND COALESCE(r.occupied, r.current_occupancy, 0) < r.capacity
     AND (preferred_room_type IS NULL OR r.room_type = preferred_room_type)
     AND (preferred_floor IS NULL OR r.floor = preferred_floor)
     ORDER BY 
@@ -326,11 +350,13 @@ BEGIN
         IF room_record.room_id IS NOT NULL THEN
             -- Allocate room
             BEGIN
-                -- Update room occupancy
+                -- Update room occupancy (handle both column names)
                 UPDATE rooms 
-                SET occupied = occupied + 1,
+                SET 
+                    occupied = COALESCE(occupied, 0) + 1,
+                    current_occupancy = COALESCE(current_occupancy, 0) + 1,
                     status = CASE 
-                        WHEN (occupied + 1) >= capacity THEN 'occupied'
+                        WHEN (COALESCE(occupied, current_occupancy, 0) + 1) >= capacity THEN 'occupied'
                         ELSE 'available'
                     END
                 WHERE id = room_record.room_id;
@@ -339,6 +365,11 @@ BEGIN
                 UPDATE users 
                 SET room_id = room_record.room_id
                 WHERE id = request_record.user_id;
+                
+                -- Update user profile's room_id (if user_profiles table exists)
+                UPDATE user_profiles 
+                SET room_id = room_record.room_id
+                WHERE user_id = request_record.user_id;
                 
                 -- Update request status
                 UPDATE room_requests 
@@ -402,6 +433,81 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Function to ensure all tables are updated when allocation is made
+CREATE OR REPLACE FUNCTION sync_allocation_tables(
+    p_user_id UUID,
+    p_room_id UUID,
+    p_allocated_by UUID DEFAULT NULL,
+    p_allocation_type VARCHAR(20) DEFAULT 'manual'
+) RETURNS BOOLEAN AS $$
+DECLARE
+    room_capacity INTEGER;
+    current_occupied INTEGER;
+BEGIN
+    -- Get room details
+    SELECT capacity, COALESCE(occupied, current_occupancy, 0) 
+    INTO room_capacity, current_occupied
+    FROM rooms 
+    WHERE id = p_room_id;
+    
+    -- Check if room has capacity
+    IF current_occupied >= room_capacity THEN
+        RAISE EXCEPTION 'Room is at full capacity';
+    END IF;
+    
+    -- Update room occupancy (handle both column names)
+    UPDATE rooms 
+    SET 
+        occupied = COALESCE(occupied, 0) + 1,
+        current_occupancy = COALESCE(current_occupancy, 0) + 1,
+        status = CASE 
+            WHEN (COALESCE(occupied, current_occupancy, 0) + 1) >= capacity THEN 'occupied'
+            ELSE 'available'
+        END
+    WHERE id = p_room_id;
+    
+    -- Update user's room_id
+    UPDATE users 
+    SET room_id = p_room_id
+    WHERE id = p_user_id;
+    
+    -- Update user profile's room_id (if user_profiles table exists)
+    UPDATE user_profiles 
+    SET room_id = p_room_id
+    WHERE user_id = p_user_id;
+    
+    -- Create allocation record
+    INSERT INTO room_allocations (
+        user_id, room_id, allocated_by, allocation_type
+    ) VALUES (
+        p_user_id, 
+        p_room_id, 
+        p_allocated_by, 
+        p_allocation_type
+    );
+    
+    RETURN TRUE;
+    
+EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'Failed to sync allocation tables: %', SQLERRM;
+END;
+$$ LANGUAGE plpgsql;
+
+-- SAMPLE DATA FOR TESTING
+-- Insert sample rooms if they don't exist
+INSERT INTO rooms (room_number, floor, room_type, capacity, price, status, amenities) VALUES
+('101', 1, 'standard', 2, 5000.00, 'available', ARRAY['WiFi', 'Furniture', 'Shared Bathroom']),
+('102', 1, 'standard', 2, 5000.00, 'available', ARRAY['WiFi', 'Furniture', 'Shared Bathroom']),
+('103', 1, 'deluxe', 1, 7500.00, 'available', ARRAY['WiFi', 'Furniture', 'Private Bathroom', 'AC']),
+('104', 1, 'deluxe', 1, 7500.00, 'available', ARRAY['WiFi', 'Furniture', 'Private Bathroom', 'AC']),
+('201', 2, 'standard', 2, 5000.00, 'available', ARRAY['WiFi', 'Furniture', 'Shared Bathroom']),
+('202', 2, 'standard', 2, 5000.00, 'available', ARRAY['WiFi', 'Furniture', 'Shared Bathroom']),
+('203', 2, 'premium', 1, 10000.00, 'available', ARRAY['WiFi', 'Furniture', 'Private Bathroom', 'AC', 'Balcony']),
+('204', 2, 'premium', 1, 10000.00, 'available', ARRAY['WiFi', 'Furniture', 'Private Bathroom', 'AC', 'Balcony']),
+('301', 3, 'suite', 1, 15000.00, 'available', ARRAY['WiFi', 'Furniture', 'Private Bathroom', 'AC', 'Balcony', 'Kitchen']),
+('302', 3, 'suite', 1, 15000.00, 'available', ARRAY['WiFi', 'Furniture', 'Private Bathroom', 'AC', 'Balcony', 'Kitchen'])
+ON CONFLICT (room_number) DO NOTHING;
+
 -- Function to process waitlist when rooms become available
 CREATE OR REPLACE FUNCTION process_waitlist() RETURNS INTEGER AS $$
 DECLARE
@@ -433,11 +539,13 @@ BEGIN
         IF room_record.room_id IS NOT NULL THEN
             -- Allocate room to waitlisted user
             BEGIN
-                -- Update room occupancy
+                -- Update room occupancy (handle both column names)
                 UPDATE rooms 
-                SET occupied = occupied + 1,
+                SET 
+                    occupied = COALESCE(occupied, 0) + 1,
+                    current_occupancy = COALESCE(current_occupancy, 0) + 1,
                     status = CASE 
-                        WHEN (occupied + 1) >= capacity THEN 'occupied'
+                        WHEN (COALESCE(occupied, current_occupancy, 0) + 1) >= capacity THEN 'occupied'
                         ELSE 'available'
                     END
                 WHERE id = room_record.room_id;
@@ -446,6 +554,11 @@ BEGIN
                 UPDATE users 
                 SET room_id = room_record.room_id
                 WHERE id = waitlist_record.user_id;
+                
+                -- Update user profile's room_id (if user_profiles table exists)
+                UPDATE user_profiles 
+                SET room_id = room_record.room_id
+                WHERE user_id = waitlist_record.user_id;
                 
                 -- Update request status
                 UPDATE room_requests 

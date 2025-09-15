@@ -1,297 +1,299 @@
-# 🏠 Complete Room Allocation System
+# 🏠 HostelHaven Room Allocation System
 
-## 📋 **System Overview**
+A comprehensive room allocation system built with React frontend and Node.js/Express backend with PostgreSQL database.
 
-This is a comprehensive room allocation system that handles the complete workflow from room creation to student allocation, including waitlist management and batch processing.
+## 🚀 Features
 
-## 🔄 **Workflow Process**
+### **Admin Features**
+- **Room Management**: Add, edit, and manage hostel rooms
+- **Allocation Dashboard**: Process room requests manually or in batches
+- **Waitlist Management**: Monitor and process waitlisted students
+- **Statistics Dashboard**: View occupancy rates and allocation metrics
+- **Real-time Updates**: Live data synchronization across all tables
 
-### 1. **Admin Adds Rooms**
-- Admins create rooms with capacity, type, and pricing
-- Rooms start with `occupied = 0` and `status = 'available'`
+### **Student Features**
+- **Room Request**: Submit room allocation requests with preferences
+- **Status Tracking**: Monitor request status and waitlist position
+- **Room Browser**: View available rooms and their details
+- **Self-Service**: Cancel or modify requests as needed
 
-### 2. **Students Request Room Allocation**
-- Students submit room allocation requests
-- Can specify preferences (room type, floor, special requirements)
-- Requests are stored with priority scoring
+## 📋 System Architecture
 
-### 3. **Priority-Based Allocation**
-- **Request timestamp** (first-come, first-served)
-- **User role priority** (admin > warden > operations > student)
-- **Account seniority** (older accounts get priority)
-- **Special requirements** consideration
+### **Database Tables**
+1. **`rooms`** - Room information and availability
+2. **`room_requests`** - Student room requests
+3. **`room_allocations`** - Allocation history and tracking
+4. **`room_waitlist`** - Waitlisted students queue
+5. **`allocation_batches`** - Batch allocation process logs
+6. **`users`** - User accounts and profiles
+7. **`user_profiles`** - Detailed student information
 
-### 4. **Batch Allocation Process**
-- Automated or manual batch processing
-- Allocates rooms to pending requests in priority order
-- Updates room occupancy and user assignments
-- Handles waitlist for unavailable rooms
+### **Key Functions**
+- **`run_batch_allocation()`** - Automated room allocation
+- **`process_waitlist()`** - Process waitlisted students
+- **`sync_allocation_tables()`** - Ensure data consistency
+- **`find_available_rooms()`** - Find rooms matching criteria
+- **`calculate_priority_score()`** - Calculate allocation priority
 
-### 5. **Waitlist Management**
-- Students without available rooms go to waitlist
-- Automatic processing when rooms become available
-- Position-based waitlist with priority scoring
+## 🛠️ Installation & Setup
 
-## 🗄️ **Database Tables**
-
-### **1. `rooms` Table**
-```sql
-- id (UUID, Primary Key)
-- room_number (VARCHAR, Unique)
-- floor (INTEGER)
-- room_type (VARCHAR: standard, deluxe, premium, suite)
-- capacity (INTEGER)
-- occupied (INTEGER)
-- price (DECIMAL)
-- status (VARCHAR: available, occupied, maintenance, reserved)
-- amenities (TEXT[])
-- created_at, updated_at (TIMESTAMP)
+### **Backend Setup**
+1. Install dependencies:
+```bash
+cd hostelhaven-b-end
+npm install
 ```
 
-### **2. `room_requests` Table**
-```sql
-- id (UUID, Primary Key)
-- user_id (UUID, Foreign Key to users)
-- requested_at (TIMESTAMP)
-- status (VARCHAR: pending, allocated, waitlisted, cancelled, expired)
-- priority_score (INTEGER, Calculated)
-- preferred_room_type (VARCHAR)
-- preferred_floor (INTEGER)
-- special_requirements (TEXT)
-- allocated_room_id (UUID, Foreign Key to rooms)
-- allocated_at (TIMESTAMP)
-- allocated_by (UUID, Foreign Key to users)
-- waitlist_position (INTEGER)
-- expires_at (TIMESTAMP)
-- created_at, updated_at (TIMESTAMP)
+2. Set up environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your database credentials
 ```
 
-### **3. `room_allocations` Table**
-```sql
-- id (UUID, Primary Key)
-- user_id (UUID, Foreign Key to users)
-- room_id (UUID, Foreign Key to rooms)
-- allocated_at (TIMESTAMP)
-- allocated_by (UUID, Foreign Key to users)
-- allocation_type (VARCHAR: automatic, manual, transfer)
-- status (VARCHAR: active, ended, transferred)
-- ended_at (TIMESTAMP)
-- ended_reason (VARCHAR)
-- notes (TEXT)
-- created_at, updated_at (TIMESTAMP)
+3. Run database migrations:
+```bash
+# Run the complete database setup
+psql -d your_database -f complete-database-setup.sql
+
+# Or run the room allocation schema
+psql -d your_database -f room-allocation-schema.sql
 ```
 
-### **4. `room_waitlist` Table**
-```sql
-- id (UUID, Primary Key)
-- user_id (UUID, Foreign Key to users)
-- room_request_id (UUID, Foreign Key to room_requests)
-- position (INTEGER)
-- preferred_room_type (VARCHAR)
-- priority_score (INTEGER)
-- added_at (TIMESTAMP)
-- notified_at (TIMESTAMP)
-- expires_at (TIMESTAMP)
-- created_at, updated_at (TIMESTAMP)
+4. Start the server:
+```bash
+npm start
 ```
 
-### **5. `allocation_batches` Table**
-```sql
-- id (UUID, Primary Key)
-- batch_name (VARCHAR)
-- started_at (TIMESTAMP)
-- completed_at (TIMESTAMP)
-- status (VARCHAR: running, completed, failed)
-- total_requests (INTEGER)
-- allocated_count (INTEGER)
-- waitlisted_count (INTEGER)
-- errors (TEXT[])
-- run_by (UUID, Foreign Key to users)
-- created_at (TIMESTAMP)
+### **Frontend Setup**
+1. Install dependencies:
+```bash
+cd frontend
+npm install
 ```
 
-## 🔧 **Key Functions**
+2. Start the development server:
+```bash
+npm start
+```
 
-### **1. `calculate_priority_score(user_id, requested_at)`**
-Calculates priority score based on:
-- Request timestamp (earlier = higher score)
-- User role (admin: +10000, warden: +8000, operations: +6000, student: +1000)
-- Account seniority (days since account creation)
+## 🎯 Usage Guide
 
-### **2. `find_available_rooms(preferred_room_type, preferred_floor)`**
-Finds available rooms matching preferences:
-- Status = 'available'
-- Occupied < capacity
-- Matches room type and floor preferences
-- Returns available spots count
+### **For Administrators**
 
-### **3. `run_batch_allocation(batch_name, run_by_user_id)`**
-Main allocation function:
-- Processes requests in priority order
-- Allocates available rooms
-- Updates room occupancy
-- Creates allocation records
-- Handles waitlist for unavailable rooms
-- Returns batch ID for tracking
+#### **1. Room Management**
+- Navigate to "Room Management" in the admin panel
+- Click "Add Room" to create new rooms
+- Set room details: number, floor, type, capacity, price, amenities
+- Edit existing rooms or view availability status
 
-### **4. `process_waitlist()`**
-Processes waitlist when rooms become available:
-- Finds available rooms
-- Allocates to highest priority waitlisted users
-- Updates all related records
-- Returns count of processed entries
+#### **2. Processing Allocations**
+- Go to "Allocation Dashboard"
+- View all pending room requests
+- **Manual Allocation**: Click "Allocate" on individual requests
+- **Batch Allocation**: Click "Run Batch Allocation" to process all pending requests
+- **Waitlist Processing**: Click "Process Waitlist" when rooms become available
 
-## 🚀 **API Endpoints**
+#### **3. Monitoring & Statistics**
+- Check "Statistics" for occupancy rates and metrics
+- Monitor "Waitlist Management" for queue status
+- View real-time alerts and recommendations
+
+### **For Students**
+
+#### **1. Submitting Room Request**
+- Navigate to "My Room Request"
+- Click "Submit Room Request"
+- Fill in preferences:
+  - Room type (standard/deluxe/premium/suite)
+  - Preferred floor
+  - Special requirements
+  - Expiration date (optional)
+
+#### **2. Tracking Request Status**
+- View current request status (pending/allocated/waitlisted)
+- Check priority score and waitlist position
+- Monitor allocated room details
+
+#### **3. Managing Requests**
+- Cancel pending requests
+- Delete requests (if not allocated)
+- View available rooms
+
+## 🔄 Allocation Workflow
+
+### **1. Setup Phase**
+```
+Admin adds rooms → Rooms become available → Students can request
+```
+
+### **2. Request Phase**
+```
+Student submits request → System validates → Request marked as "pending"
+```
+
+### **3. Allocation Phase**
+```
+Admin runs batch allocation → Priority calculation → Room assignment
+```
+
+### **4. Waitlist Phase**
+```
+No rooms available → Student added to waitlist → Position assigned
+```
+
+### **5. Processing Phase**
+```
+Rooms become available → Process waitlist → Allocate to waitlisted students
+```
+
+## 📊 Priority System
+
+The system uses a sophisticated priority scoring algorithm:
+
+### **Base Score**
+- Earlier requests get higher scores
+- Time-based priority calculation
+
+### **Role-Based Priority**
+- **Admin**: +10,000 points
+- **Warden**: +8,000 points
+- **Staff**: +6,000 points
+- **Student**: +1,000 points
+- **Guest**: +500 points
+
+### **Seniority Bonus**
+- Older accounts get additional priority
+- Calculated in days since account creation
+
+## 🔧 API Endpoints
 
 ### **Room Management**
-- `POST /api/room-allocation/rooms` - Admin adds room
-- `GET /api/room-allocation/rooms` - Get all rooms with availability
+- `GET /api/room-allocation/rooms` - List all rooms
+- `POST /api/room-allocation/rooms` - Create new room
+- `PUT /api/room-allocation/rooms/:id` - Update room
 
 ### **Request Management**
-- `POST /api/room-allocation/request` - Student requests room
-- `GET /api/room-allocation/request` - Get user's request status
-- `GET /api/room-allocation/requests` - Get all requests (Admin)
-- `PUT /api/room-allocation/request/:id/cancel` - Cancel request
+- `POST /api/room-allocation/request` - Submit room request
+- `GET /api/room-allocation/request` - Get user's request
+- `GET /api/room-allocation/requests` - List all requests (admin)
+- `PUT /api/room-allocation/requests/:id/approve` - Approve request
+- `PUT /api/room-allocation/requests/:id/cancel` - Cancel request
 
 ### **Allocation Processing**
 - `POST /api/room-allocation/batch-allocate` - Run batch allocation
-- `GET /api/room-allocation/batch-status/:id` - Get batch status
 - `POST /api/room-allocation/process-waitlist` - Process waitlist
+- `GET /api/room-allocation/waitlist` - Get waitlist (admin)
 
-### **Monitoring**
-- `GET /api/room-allocation/waitlist` - Get waitlist (Admin)
+### **Statistics**
 - `GET /api/room-allocation/statistics` - Get allocation statistics
 
-## 📊 **Usage Examples**
-
-### **1. Admin Adds Rooms**
-```bash
-POST /api/room-allocation/rooms
-{
-  "room_number": "101",
-  "floor": 1,
-  "room_type": "standard",
-  "capacity": 2,
-  "price": 5000.00,
-  "amenities": ["AC", "WiFi", "Study Table"]
-}
-```
-
-### **2. Student Requests Room**
-```bash
-POST /api/room-allocation/request
-{
-  "preferred_room_type": "standard",
-  "preferred_floor": 1,
-  "special_requirements": "Need ground floor access",
-  "expires_at": "2024-12-31T23:59:59Z"
-}
-```
-
-### **3. Run Batch Allocation**
-```bash
-POST /api/room-allocation/batch-allocate
-{
-  "batch_name": "Monthly Allocation - December 2024"
-}
-```
-
-### **4. Check Statistics**
-```bash
-GET /api/room-allocation/statistics
-```
-
-Response:
-```json
-{
-  "success": true,
-  "data": {
-    "rooms": {
-      "total": 100,
-      "total_capacity": 200,
-      "total_occupied": 150,
-      "available": 25,
-      "occupancy_rate": "75.00"
-    },
-    "requests": {
-      "pending": 15,
-      "waitlisted": 8,
-      "allocated": 150,
-      "total": 173
-    }
-  }
-}
-```
-
-## 🔄 **Automated Processes**
-
-### **1. Priority Calculation**
-- Automatically calculated when requests are created
-- Updated during batch allocation
-- Considers role, seniority, and request time
-
-### **2. Room Status Updates**
-- Automatically updated when occupancy changes
-- Status changes from 'available' to 'occupied' when full
-- Reverts to 'available' when space becomes free
-
-### **3. Waitlist Processing**
-- Can be triggered manually or automatically
-- Processes when rooms become available
-- Maintains priority order
-
-## 🛡️ **Security & Permissions**
+## 🛡️ Security Features
 
 ### **Row Level Security (RLS)**
-- Users can only view their own requests
-- Admins can manage all requests and rooms
-- Public access to room availability
+- Students can only view their own requests
+- Admins have full access to all data
+- Secure data isolation
 
-### **Role-Based Access**
-- **Students**: Can request and view their own requests
-- **Admins**: Full access to all functions
-- **Operations**: Can manage rooms and allocations
+### **Authentication**
+- JWT-based authentication
+- Role-based access control
+- Secure API endpoints
 
-## 📈 **Monitoring & Analytics**
+### **Data Validation**
+- Input validation on all forms
+- Server-side validation
+- SQL injection protection
 
-### **Batch Tracking**
-- Track allocation batch performance
-- Monitor success/failure rates
-- Error logging and reporting
+## 🔍 Monitoring & Alerts
+
+### **Real-time Alerts**
+- High occupancy warnings (>90%)
+- Waitlist processing notifications
+- Pending request alerts
 
 ### **Statistics Dashboard**
-- Real-time occupancy rates
-- Request status distribution
-- Waitlist length and processing
+- Occupancy rate monitoring
+- Request processing metrics
+- System performance indicators
 
-## 🚀 **Setup Instructions**
+## 🚨 Troubleshooting
 
-1. **Run the schema**:
-   ```sql
-   -- Copy and paste room-allocation-schema.sql in Supabase SQL Editor
-   ```
+### **Common Issues**
 
-2. **Add the route** to your main server:
-   ```javascript
-   const roomAllocationRoutes = require('./routes/room-allocation');
-   app.use('/api/room-allocation', roomAllocationRoutes);
-   ```
+#### **"Policy already exists" Error**
+- Run the updated schema with `DROP POLICY IF EXISTS` statements
+- The schema is now idempotent and safe to run multiple times
 
-3. **Test the system**:
-   - Create some rooms as admin
-   - Submit room requests as students
-   - Run batch allocation
-   - Monitor results
+#### **Data Inconsistency**
+- Use the `sync_allocation_tables()` function
+- Ensures all related tables are updated atomically
 
-## 🎯 **Benefits**
+#### **Room Occupancy Issues**
+- Check both `occupied` and `current_occupancy` columns
+- The system handles both naming conventions
 
-✅ **Automated Priority System** - Fair allocation based on multiple factors
-✅ **Scalable Architecture** - Handles large numbers of requests efficiently
-✅ **Waitlist Management** - No lost requests, automatic processing
-✅ **Audit Trail** - Complete history of all allocations
-✅ **Real-time Monitoring** - Live statistics and status tracking
-✅ **Flexible Preferences** - Students can specify room preferences
-✅ **Batch Processing** - Efficient bulk allocation
-✅ **Error Handling** - Robust error management and recovery
+### **Database Maintenance**
+```sql
+-- Check data consistency
+SELECT 
+  r.room_number,
+  r.occupied,
+  r.current_occupancy,
+  COUNT(ra.id) as actual_allocations
+FROM rooms r
+LEFT JOIN room_allocations ra ON r.id = ra.room_id AND ra.status = 'active'
+GROUP BY r.id, r.room_number, r.occupied, r.current_occupancy;
 
-This system provides a complete, production-ready room allocation solution that can handle complex scenarios and scale with your hostel management needs!
+-- Reset room occupancy if needed
+UPDATE rooms SET 
+  occupied = (SELECT COUNT(*) FROM room_allocations WHERE room_id = rooms.id AND status = 'active'),
+  current_occupancy = (SELECT COUNT(*) FROM room_allocations WHERE room_id = rooms.id AND status = 'active');
+```
+
+## 📈 Performance Optimization
+
+### **Database Indexes**
+- Optimized indexes on frequently queried columns
+- Composite indexes for complex queries
+- Partial indexes for filtered data
+
+### **Caching Strategy**
+- Room availability caching
+- User session caching
+- Statistics caching
+
+### **Query Optimization**
+- Efficient JOIN operations
+- Optimized WHERE clauses
+- Pagination for large datasets
+
+## 🔮 Future Enhancements
+
+### **Planned Features**
+- Email notifications for status changes
+- Mobile app integration
+- Advanced reporting and analytics
+- Room transfer functionality
+- Payment integration
+- Maintenance request system
+
+### **Scalability Improvements**
+- Database sharding
+- Microservices architecture
+- Real-time WebSocket updates
+- Advanced caching strategies
+
+## 📞 Support
+
+For technical support or questions:
+- Check the troubleshooting section
+- Review the API documentation
+- Contact the development team
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+---
+
+**Built with ❤️ for HostelHaven**
