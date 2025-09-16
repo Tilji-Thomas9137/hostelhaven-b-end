@@ -53,7 +53,9 @@ router.post('/rooms', authMiddleware, adminMiddleware, [
       room_type: room_type || 'standard',
       capacity,
       price,
-      amenities: amenities || []
+      amenities: amenities || [],
+      occupied: 0,
+      status: 'available'
     })
     .select()
     .single();

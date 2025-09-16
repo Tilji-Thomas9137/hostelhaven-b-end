@@ -310,19 +310,13 @@ router.delete('/hostels/:id', authMiddleware, adminMiddleware, asyncHandler(asyn
  * @access  Private (Admin only)
  */
 router.get('/hostels/:id/rooms', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
   const { data: rooms, error } = await supabase
     .from('rooms')
-    .select(`
-      *,
-      users(full_name, email)
-    `)
-    .eq('hostel_id', id)
+    .select('*')
     .order('room_number', { ascending: true });
 
   if (error) {
-    console.error('Error fetching hostel rooms:', error);
+    console.error('Error fetching rooms:', error);
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch rooms',
@@ -344,7 +338,6 @@ router.get('/hostels/:id/rooms', authMiddleware, adminMiddleware, asyncHandler(a
 router.get('/students', authMiddleware, adminMiddleware, [
   query('limit').optional().isInt({ min: 1, max: 100 }),
   query('offset').optional().isInt({ min: 0 }),
-  query('hostel_id').optional().isUUID(),
   query('search').optional().isString()
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -352,22 +345,16 @@ router.get('/students', authMiddleware, adminMiddleware, [
     throw new ValidationError('Validation failed', errors.array());
   }
 
-  const { limit = 20, offset = 0, hostel_id, search } = req.query;
+  const { limit = 20, offset = 0, search } = req.query;
 
   let query = supabase
     .from('users')
     .select(`
       *,
-      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status),
-      rooms:rooms(id, room_number, room_type, floor),
-      hostels:hostels(id, name)
+      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status)
     `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
-
-  if (hostel_id) {
-    query = query.eq('hostel_id', hostel_id);
-  }
 
   if (search) {
     query = query.or(`full_name.ilike.%${search}%,email.ilike.%${search}%`);
@@ -384,11 +371,24 @@ router.get('/students', authMiddleware, adminMiddleware, [
     });
   }
 
-  // Process user data (null-safe when no room/hostel assigned)
-  const usersWithStatus = (students || []).map(user => ({
-    ...user,
-    hostelName: user.hostels?.name || 'Not assigned',
-    roomNumber: user.rooms?.room_number || 'Not assigned'
+  // Process user data and get room information separately
+  const usersWithStatus = await Promise.all((students || []).map(async (user) => {
+    let roomInfo = null;
+    if (user.room_id) {
+      const { data: room } = await supabase
+        .from('rooms')
+        .select('room_number, floor, room_type')
+        .eq('id', user.room_id)
+        .single();
+      roomInfo = room;
+    }
+    
+    return {
+      ...user,
+      roomNumber: roomInfo?.room_number || 'Not assigned',
+      roomFloor: roomInfo?.floor || null,
+      roomType: roomInfo?.room_type || null
+    };
   }));
 
   res.json({
@@ -456,8 +456,6 @@ router.get('/users', authMiddleware, adminMiddleware, [
 
   const { limit = 20, offset = 0, search = '', role = '' } = req.query;
 
-  // Fetch base users and profile in one go. Avoid implicit relationships to rooms/hostels
-  // because the DB may not have FKs defined for PostgREST to infer.
   let query = supabase
     .from('users')
     .select(`
@@ -472,7 +470,7 @@ router.get('/users', authMiddleware, adminMiddleware, [
     query = query.or(`full_name.ilike.%${search}%,email.ilike.%${search}%`);
   }
 
-  // Apply role filter (default to students if explicitly requested by frontend)
+  // Apply role filter
   if (role) {
     query = query.eq('role', role);
   }
@@ -488,43 +486,26 @@ router.get('/users', authMiddleware, adminMiddleware, [
     });
   }
 
-  // Manually load rooms and hostels in separate queries and stitch results
-  const users = students || [];
-  const roomIds = Array.from(new Set(users.map(u => u.room_id).filter(Boolean)));
-  const hostelIds = Array.from(new Set(users.map(u => u.hostel_id).filter(Boolean)));
-
-  let roomsById = {};
-  if (roomIds.length > 0) {
-    const { data: rooms, error: roomsError } = await supabase
-      .from('rooms')
-      .select('id, room_number, floor, room_type, capacity, occupied, rent_amount')
-      .in('id', roomIds);
-    if (!roomsError && rooms) {
-      roomsById = rooms.reduce((acc, r) => { acc[r.id] = r; return acc; }, {});
-    } else if (roomsError) {
-      console.warn('Warning: could not load rooms for users:', roomsError.message);
+  // Process user data and get room information separately
+  const usersWithStatus = await Promise.all((students || []).map(async (user) => {
+    let roomInfo = null;
+    if (user.room_id) {
+      const { data: room } = await supabase
+        .from('rooms')
+        .select('room_number, floor, room_type, capacity, occupied')
+        .eq('id', user.room_id)
+        .single();
+      roomInfo = room;
     }
-  }
-
-  let hostelsById = {};
-  if (hostelIds.length > 0) {
-    const { data: hostels, error: hostelsError } = await supabase
-      .from('hostels')
-      .select('id, name')
-      .in('id', hostelIds);
-    if (!hostelsError && hostels) {
-      hostelsById = hostels.reduce((acc, h) => { acc[h.id] = h; return acc; }, {});
-    } else if (hostelsError) {
-      console.warn('Warning: could not load hostels for users:', hostelsError.message);
-    }
-  }
-
-  const usersWithStatus = users.map(user => ({
-    ...user,
-    rooms: user.room_id ? roomsById[user.room_id] || null : null,
-    hostels: user.hostel_id ? hostelsById[user.hostel_id] || null : null,
-    roomNumber: user.room_id && roomsById[user.room_id] ? roomsById[user.room_id].room_number : 'Not Assigned',
-    hostelName: user.hostel_id && hostelsById[user.hostel_id] ? hostelsById[user.hostel_id].name : 'Not Assigned'
+    
+    return {
+      ...user,
+      roomNumber: roomInfo?.room_number || 'Not assigned',
+      roomFloor: roomInfo?.floor || null,
+      roomType: roomInfo?.room_type || null,
+      roomCapacity: roomInfo?.capacity || null,
+      roomOccupied: roomInfo?.occupied || 0
+    };
   }));
 
   res.json({
@@ -571,29 +552,17 @@ router.get('/users/:id', authMiddleware, adminMiddleware, asyncHandler(async (re
   if (user.room_id) {
     const { data: room } = await supabase
       .from('rooms')
-      .select('room_number, floor, room_type, capacity')
+      .select('room_number, floor, room_type, capacity, occupied, price, amenities')
       .eq('id', user.room_id)
       .single();
     roomInfo = room;
-  }
-
-  // Get hostel info if user has a hostel
-  let hostelInfo = null;
-  if (user.hostel_id) {
-    const { data: hostel } = await supabase
-      .from('hostels')
-      .select('name, address, city')
-      .eq('id', user.hostel_id)
-      .single();
-    hostelInfo = hostel;
   }
 
   // Combine all data
   const userWithDetails = {
     ...user,
     user_profiles: userProfile,
-    rooms: roomInfo,
-    hostels: hostelInfo
+    rooms: roomInfo
   };
 
   res.json({
