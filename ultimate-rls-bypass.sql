@@ -81,3 +81,5 @@ SELECT 'RLS completely disabled on all tables' as status;
 SELECT 'All policies removed' as policies_removed;
 SELECT 'aadhar_verify bucket is public' as bucket_status;
 SELECT 'Profile saving should now work without restrictions' as next_step;
+
+

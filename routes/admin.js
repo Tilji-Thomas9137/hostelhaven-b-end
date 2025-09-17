@@ -42,6 +42,11 @@ router.get('/dashboard-stats', authMiddleware, adminMiddleware, asyncHandler(asy
       .from('rooms')
       .select('*', { count: 'exact', head: true });
 
+    // Total hostels count (for frontend hostels card)
+    const { count: totalHostels } = await supabase
+      .from('hostels')
+      .select('*', { count: 'exact', head: true });
+
     let totalRevenue = 0;
     const { data: revenueData } = await supabase
       .from('payments')
@@ -69,6 +74,7 @@ router.get('/dashboard-stats', authMiddleware, adminMiddleware, asyncHandler(asy
       data: {
         totalStudents: totalStudents || 0,
         totalRooms: totalRooms || 0,
+        totalHostels: totalHostels || 0,
         totalRevenue: totalRevenue || 0,
         pendingComplaints: pendingComplaints || 0,
         occupancyRate: parseFloat(occupancyRate),

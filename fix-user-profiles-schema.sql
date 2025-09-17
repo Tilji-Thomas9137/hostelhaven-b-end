@@ -37,3 +37,4 @@ ALTER COLUMN status SET DEFAULT 'incomplete';
 
 ALTER TABLE user_profiles 
 ALTER COLUMN profile_status SET DEFAULT 'active';
+

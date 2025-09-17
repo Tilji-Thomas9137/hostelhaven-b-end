@@ -77,7 +77,7 @@ router.post('/verify', upload.single('aadharImage'), asyncHandler(async (req, re
     // Check if Aadhar number already exists in database
     const { data: existingProfile, error: checkError } = await supabase
       .from('user_profiles')
-      .select('aadhar_number, full_name')
+      .select('aadhar_number')
       .eq('aadhar_number', extractedInfo.aadharNumber)
       .single();
 

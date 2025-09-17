@@ -16,3 +16,5 @@ ADD COLUMN IF NOT EXISTS pincode VARCHAR(10);
 -- Show confirmation
 SELECT 'Aadhar URL columns added to user_profiles table' as status;
 SELECT 'Columns added: aadhar_front_url, aadhar_back_url, pincode' as columns_added;
+
+

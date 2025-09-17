@@ -107,10 +107,10 @@ router.post('/', authMiddleware, async (req, res, next) => {
 
     // Check if student already has an active room allocation
     const { data: existingAllocation, error: checkError } = await supabase
-      .from('room_assignments')
+      .from('room_allocations')
       .select('*')
       .eq('user_id', student_id)
-      .eq('is_active', true)
+      .eq('status', 'active')
       .single();
 
     if (checkError && checkError.code !== 'PGRST116') {
@@ -149,13 +149,14 @@ router.post('/', authMiddleware, async (req, res, next) => {
 
     // Create room allocation
     const { data: allocation, error: allocationError } = await supabase
-      .from('room_assignments')
+      .from('room_allocations')
       .insert({
         user_id: student_id,
         room_id: room_id,
-        hostel_id: student.hostel_id,
-        start_date: start_date,
-        is_active: true
+        allocated_at: start_date,
+        allocated_by: req.user?.id || null,
+        allocation_type: 'manual',
+        status: 'active'
       })
       .select()
       .single();
@@ -189,7 +190,7 @@ router.post('/', authMiddleware, async (req, res, next) => {
 
     // Get the complete allocation data
     const { data: completeAllocation, error: fetchError } = await supabase
-      .from('room_assignments')
+      .from('room_allocations')
       .select('*')
       .eq('id', allocation.id)
       .single();
@@ -220,25 +221,89 @@ router.patch('/:id/deallocate', authMiddleware, async (req, res, next) => {
 
     // Get current allocation
     const { data: allocation, error: fetchError } = await supabase
-      .from('room_assignments')
+      .from('room_allocations')
       .select('*')
       .eq('id', id)
       .single();
 
     if (fetchError) {
-      throw new ValidationError('Room allocation not found');
+      // Backward compatibility: try legacy table 'room_assignments'
+      const { data: legacyAlloc, error: legacyErr } = await supabase
+        .from('room_assignments')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (legacyErr) {
+        throw new ValidationError('Room allocation not found');
+      }
+
+      // If legacy allocation exists, deallocate using legacy schema and exit early
+      if (!legacyAlloc.is_active) {
+        throw new ValidationError('Room allocation is already deallocated');
+      }
+
+      const { error: legacyUpdateErr } = await supabase
+        .from('room_assignments')
+        .update({ 
+          is_active: false,
+          end_date: end_date
+        })
+        .eq('id', id);
+
+      if (legacyUpdateErr) {
+        throw new ValidationError('Failed to deallocate room');
+      }
+
+      // Remove room_id from user
+      const { error: legacyUserErr } = await supabase
+        .from('users')
+        .update({ room_id: null })
+        .eq('id', legacyAlloc.user_id);
+
+      if (legacyUserErr) {
+        throw new ValidationError('Failed to update student room assignment');
+      }
+
+      // Update room occupancy
+      const { data: legacyRoom, error: legacyRoomErr } = await supabase
+        .from('rooms')
+        .select('occupied, capacity')
+        .eq('id', legacyAlloc.room_id)
+        .single();
+
+      if (legacyRoomErr) {
+        throw new ValidationError('Failed to fetch room details');
+      }
+
+      const { error: legacyOccErr } = await supabase
+        .from('rooms')
+        .update({ 
+          occupied: Math.max(0, legacyRoom.occupied - 1),
+          status: 'available'
+        })
+        .eq('id', legacyAlloc.room_id);
+
+      if (legacyOccErr) {
+        throw new ValidationError('Failed to update room occupancy');
+      }
+
+      return res.json({
+        success: true,
+        message: 'Room deallocated successfully'
+      });
     }
 
-    if (!allocation.is_active) {
+    if (allocation.status !== 'active') {
       throw new ValidationError('Room allocation is already deallocated');
     }
 
-    // Update allocation to inactive
+    // Update allocation to ended
     const { error: updateAllocationError } = await supabase
-      .from('room_assignments')
+      .from('room_allocations')
       .update({ 
-        is_active: false,
-        end_date: end_date
+        status: 'ended',
+        ended_at: end_date
       })
       .eq('id', id);
 
@@ -294,10 +359,10 @@ router.get('/student/:student_id', authMiddleware, async (req, res, next) => {
     const { student_id } = req.params;
 
     const { data: allocations, error } = await supabase
-      .from('room_assignments')
+      .from('room_allocations')
       .select('*')
       .eq('user_id', student_id)
-      .order('start_date', { ascending: false });
+      .order('allocated_at', { ascending: false });
 
     if (error) {
       throw new ValidationError('Failed to fetch student room history');

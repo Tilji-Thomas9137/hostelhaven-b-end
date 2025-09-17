@@ -38,3 +38,5 @@ ORDER BY ordinal_position;
 -- Step 6: Show confirmation
 SELECT 'User profiles schema updated successfully' as status;
 SELECT 'Added columns: aadhar_front_url, aadhar_back_url, pincode' as columns_added;
+
+

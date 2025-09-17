@@ -62,3 +62,4 @@ CREATE POLICY "users_update_own" ON users
 
 CREATE POLICY "users_insert_own" ON users
     FOR INSERT WITH CHECK (auth.uid() = id);
+

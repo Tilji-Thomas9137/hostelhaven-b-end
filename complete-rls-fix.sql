@@ -110,3 +110,4 @@ CREATE POLICY "service_role_bypass" ON user_profiles
 
 CREATE POLICY "service_role_bypass_users" ON users
     FOR ALL USING (auth.role() = 'service_role');
+

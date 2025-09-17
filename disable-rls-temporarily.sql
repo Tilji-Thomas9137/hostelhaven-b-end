@@ -42,3 +42,5 @@ WHERE course IS NULL;
 -- Show current state
 SELECT 'RLS disabled on user_profiles and users tables' as status;
 SELECT 'You can now test profile saving without RLS restrictions' as next_step;
+
+
