@@ -10,8 +10,21 @@ router.get('/', authMiddleware, async (req, res, next) => {
   try {
     // Step 1: Fetch allocations without embedding to avoid relationship ambiguity
     const { data: allocations, error: allocationsError } = await supabase
-      .from('room_allocations')
-      .select('id, user_id, room_id, status, allocated_at, ended_at, created_at')
+      .from('users')
+      .select(`
+        id,
+        full_name,
+        email,
+        room_id,
+        rooms!users_room_id_fkey(
+          id,
+          room_number,
+          floor,
+          room_type,
+          capacity
+        )
+      `)
+      .not('room_id', 'is', null)
       .order('created_at', { ascending: false });
 
     if (allocationsError) {
@@ -24,26 +37,21 @@ router.get('/', authMiddleware, async (req, res, next) => {
       return res.json({ success: true, data: { allocations: [] } });
     }
 
-    // Step 2: Batch fetch related users and rooms
-    const userIds = Array.from(new Set(list.map(a => a.user_id).filter(Boolean)));
-    const roomIds = Array.from(new Set(list.map(a => a.room_id).filter(Boolean)));
-
-    const [{ data: users }, { data: rooms }] = await Promise.all([
-      userIds.length
-        ? supabase.from('users').select('id, full_name, email').in('id', userIds)
-        : Promise.resolve({ data: [] }),
-      roomIds.length
-        ? supabase.from('rooms').select('id, room_number, floor, room_type').in('id', roomIds)
-        : Promise.resolve({ data: [] })
-    ]);
-
-    const userMap = new Map((users || []).map(u => [u.id, u]));
-    const roomMap = new Map((rooms || []).map(r => [r.id, r]));
-
+    // Step 2: Format the data (already includes related data from the query)
     const enriched = list.map(a => ({
-      ...a,
-      users: userMap.get(a.user_id) || null,
-      rooms: roomMap.get(a.room_id) || null
+      id: a.id,
+      user_id: a.id,
+      room_id: a.room_id,
+      status: 'active',
+      allocated_at: a.created_at,
+      ended_at: null,
+      created_at: a.created_at,
+      users: {
+        id: a.id,
+        full_name: a.full_name,
+        email: a.email
+      },
+      rooms: a.rooms || null
     }));
 
     res.json({ success: true, data: { allocations: enriched } });

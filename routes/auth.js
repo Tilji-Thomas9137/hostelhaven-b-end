@@ -3,6 +3,8 @@ const { body, validationResult } = require('express-validator');
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const { asyncHandler, ValidationError, AuthenticationError } = require('../middleware/errorHandler');
 const { authMiddleware } = require('../middleware/auth');
+const { body: vBody } = require('express-validator');
+const { asyncHandler: ah2 } = require('../middleware/errorHandler');
 
 const router = express.Router();
 
@@ -34,6 +36,100 @@ router.get('/google', asyncHandler(async (req, res) => {
     }
   });
 }));
+// Account activation with token + OTP
+router.post('/activate', [
+  body('token').notEmpty().withMessage('Activation token is required'),
+  body('otp').isLength({ min: 6, max: 6 }).withMessage('Valid 6-digit OTP is required'),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { token, otp, password } = req.body;
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('*')
+    .eq('activation_token', token)
+    .single();
+
+  if (userError || !user) {
+    throw new ValidationError('Invalid activation token');
+  }
+
+  if (!user.activation_expires_at || new Date(user.activation_expires_at).getTime() < Date.now()) {
+    throw new ValidationError('Activation token has expired');
+  }
+
+  if (!user.otp_code || user.otp_code !== otp) {
+    throw new ValidationError('Invalid OTP');
+  }
+
+  if (!user.otp_expires_at || new Date(user.otp_expires_at).getTime() < Date.now()) {
+    throw new ValidationError('OTP has expired');
+  }
+
+  const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
+    email: user.email,
+    password,
+    email_confirm: true
+  });
+
+  if (authError) {
+    throw new ValidationError('Failed to create authentication account');
+  }
+
+  const { data: updatedUser, error: updateError } = await supabase
+    .from('users')
+    .update({
+      auth_uid: authUser.user.id,
+      status: 'available',
+      activation_token: null,
+      activation_expires_at: null,
+      otp_code: null,
+      otp_expires_at: null,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', user.id)
+    .select()
+    .single();
+
+  if (updateError) {
+    throw new ValidationError('Failed to finalize activation');
+  }
+
+  // If this is a parent account, also verify them in the parents table
+  if (user.role === 'parent') {
+    try {
+      const { error: parentVerifyError } = await supabase
+        .from('parents')
+        .update({
+          verified: true,
+          otp_code: null,
+          otp_expires_at: null
+        })
+        .eq('user_id', user.id);
+
+      if (parentVerifyError) {
+        console.error('Failed to verify parent during activation:', parentVerifyError);
+        // Don't fail the activation for this, just log the error
+      } else {
+        console.log('Parent automatically verified during activation');
+      }
+    } catch (error) {
+      console.error('Error verifying parent during activation:', error);
+      // Don't fail the activation for this
+    }
+  }
+
+  res.json({
+    success: true,
+    message: 'Account activated successfully. You can now log in.',
+    data: { role: updatedUser.role }
+  });
+}));
 
 /**
  * @route   POST /api/auth/google/callback
@@ -53,51 +149,20 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
     throw new AuthenticationError(error.message);
   }
 
-  // Check if user exists in our database
+  // Check if user exists in our database by auth_uid
   const { data: userProfile } = await supabase
     .from('users')
     .select('*')
-    .eq('id', data.user.id)
+    .eq('auth_uid', data.user.id)
     .single();
 
   if (!userProfile) {
-    // Create user profile if it doesn't exist with default role as student
-    const { data: newProfile, error: profileError } = await supabase
-      .from('users')
-      .insert({
-        id: data.user.id,
-        email: data.user.email,
-        full_name: data.user.user_metadata?.full_name || data.user.email.split('@')[0],
-        phone: null, // Google OAuth doesn't provide phone numbers
-        role: 'student' // Default role for Google OAuth users
-      })
-      .select()
-      .single();
-
-    if (profileError) {
-      console.error('Profile creation error:', profileError);
-      throw new ValidationError('Failed to create user profile');
-    }
-  } else {
-    // If user exists but doesn't have a role, update it to student
-    if (!userProfile.role) {
-      const { error: updateError } = await supabase
-        .from('users')
-        .update({ role: 'student' })
-        .eq('id', data.user.id);
-
-      if (updateError) {
-        console.error('Role update error:', updateError);
-      }
-    }
+    // No automatic user creation - users must be created by staff
+    throw new AuthenticationError('Your account is not yet activated by hostel staff. Please contact the hostel administration.');
   }
 
-  // Get the final user profile (either existing or newly created)
-  const { data: finalUserProfile } = await supabase
-    .from('users')
-    .select('*')
-    .eq('id', data.user.id)
-    .single();
+  // Use the found user profile
+  const finalUserProfile = userProfile;
 
   res.json({
     success: true,
@@ -120,101 +185,7 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
   });
 }));
 
-/**
- * @route   POST /api/auth/register
- * @desc    Register a new user
- * @access  Public
- */
-router.post('/register', [
-  body('email')
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address')
-    .custom((value) => {
-      // Additional email validation if needed
-      if (!value || value.length < 5) {
-        throw new Error('Email must be at least 5 characters long');
-      }
-      return true;
-    }),
-  body('password')
-    .isLength({ min: 6 })
-    .withMessage('Password must be at least 6 characters long')
-    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-    .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
-  body('fullName')
-    .trim()
-    .isLength({ min: 2, max: 50 })
-    .withMessage('Full name must be between 2 and 50 characters'),
-  body('phone')
-    .optional()
-    .isMobilePhone()
-    .withMessage('Please provide a valid phone number'),
-  body('role')
-    .optional()
-    .isIn(['student', 'admin', 'hostel_operations_assistant', 'warden', 'parent'])
-    .withMessage('Invalid role specified')
-], asyncHandler(async (req, res) => {
-  // Check for validation errors
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    throw new ValidationError('Validation failed', errors.array());
-  }
-
-  const { email, password, fullName, phone, role = 'student' } = req.body;
-
-  try {
-    // Check if user already exists
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
-
-    if (existingUser) {
-      throw new ValidationError('User with this email already exists');
-    }
-
-    // Create user in Supabase Auth - requires email confirmation
-    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: false, // Require email confirmation
-      user_metadata: {
-        full_name: fullName,
-        phone: phone, // Include phone number in metadata
-        role: role
-      }
-    });
-
-    if (authError) {
-      console.error('Supabase auth error:', authError);
-      // Handle specific Supabase errors
-      if (authError.message.includes('Email address') && authError.message.includes('is invalid')) {
-        throw new ValidationError('Please provide a valid email address');
-      }
-      throw new AuthenticationError(authError.message);
-    }
-
-    // Don't create user profile yet - wait for email confirmation
-    // The profile will be created when the user first logs in after confirming email
-
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully. Please check your email to confirm your account.',
-      data: {
-        user: {
-          id: authData.user.id,
-          email: authData.user.email,
-          fullName: fullName,
-          role: role
-        }
-      }
-    });
-  } catch (error) {
-    throw error;
-  }
-}));
+// Registration endpoint removed - users must be created by staff via /api/hostel_assistant/create-student
 
 /**
  * @route   POST /api/auth/login
@@ -223,9 +194,8 @@ router.post('/register', [
  */
 router.post('/login', [
   body('email')
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please provide a valid email address'),
+    .notEmpty()
+    .withMessage('Please provide an email or username'),
   body('password')
     .notEmpty()
     .withMessage('Password is required')
@@ -237,11 +207,26 @@ router.post('/login', [
   }
 
   const { email, password } = req.body;
+  let loginEmail = email;
+
+  // Support username-based login (e.g., admission_number) by resolving to email
+  if (typeof loginEmail === 'string' && !loginEmail.includes('@')) {
+    const { data: userByUsername } = await supabase
+      .from('users')
+      .select('email')
+      .eq('username', loginEmail)
+      .single();
+
+    if (!userByUsername || !userByUsername.email) {
+      throw new AuthenticationError('Invalid email/username or password');
+    }
+    loginEmail = userByUsername.email;
+  }
 
   try {
     // Authenticate user with Supabase
     const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email,
+      email: loginEmail,
       password
     });
 
@@ -249,42 +234,43 @@ router.post('/login', [
       throw new AuthenticationError('Invalid email or password');
     }
 
-    // Get user profile
-    let { data: userProfile, error: profileError } = await supabase
+    // Link profile by auth_uid or email if not linked yet
+    let { data: userProfile } = await supabase
       .from('users')
       .select('*')
-      .eq('id', authData.user.id)
+      .eq('auth_uid', authData.user.id)
       .single();
+
+    if (!userProfile) {
+      const { data: byEmail } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', authData.user.email)
+        .single();
+      if (byEmail) {
+        // Attach auth_uid on first successful login
+        const { data: linked } = await supabase
+          .from('users')
+          .update({ auth_uid: authData.user.id, status: byEmail.status || 'available' })
+          .eq('id', byEmail.id)
+          .select()
+          .single();
+        userProfile = linked || byEmail;
+      }
+    }
 
     // Check if user is suspended before proceeding
     if (userProfile && userProfile.status === 'suspended') {
       throw new AuthenticationError('Your account has been suspended. Please contact an administrator.');
     }
 
-    // If user profile doesn't exist, create it with default role as student
-    if (profileError || !userProfile) {
-      const { data: newProfile, error: createError } = await supabase
-        .from('users')
-        .insert({
-          id: authData.user.id,
-          email: authData.user.email,
-          full_name: authData.user.user_metadata?.full_name || authData.user.email.split('@')[0],
-          phone: authData.user.user_metadata?.phone || null, // Extract phone from metadata
-          role: authData.user.user_metadata?.role || 'student', // Use role from metadata or default to student
-          password_hash: 'oauth_user' // Placeholder for OAuth users
-        })
-        .select('*')
-        .single();
-
-      if (createError) {
-        console.error('Profile creation error in login:', createError);
-        throw new AuthenticationError('Failed to create user profile');
-      }
-
-      userProfile = newProfile;
+    // If user profile doesn't exist, this means the user wasn't created by staff
+    // For our secure system, we don't allow automatic user creation
+    if (!userProfile) {
+      throw new AuthenticationError('Your account is not yet activated by hostel staff. Please contact the hostel administration.');
     }
 
-    res.json({
+  res.json({
       success: true,
       message: 'Login successful',
       data: {
@@ -556,8 +542,35 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
   try {
     let { data: userProfile, error } = await supabase
       .from('users')
-      .select('*')
-      .eq('id', req.user.id)
+      .select(`
+        *,
+        user_profiles(
+          admission_number,
+          course,
+          batch_year,
+          date_of_birth,
+          address,
+          city,
+          state,
+          country,
+          emergency_contact_name,
+          emergency_contact_phone,
+          parent_name,
+          parent_phone,
+          parent_email,
+          aadhar_number,
+          blood_group,
+          join_date,
+          profile_status,
+          status,
+          bio,
+          avatar_url,
+          pincode,
+          admission_number_verified,
+          parent_contact_locked
+        )
+      `)
+      .eq('auth_uid', req.user.id)
       .single();
 
     // If user profile doesn't exist, create it with default role as student
@@ -565,7 +578,7 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
       const { data: newProfile, error: profileError } = await supabase
         .from('users')
         .insert({
-          id: req.user.id,
+          auth_uid: req.user.id,
           email: req.user.email,
           full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
           phone: req.user.user_metadata?.phone || null,
@@ -596,7 +609,33 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
           hostelId: userProfile.hostel_id || null,
           roomId: userProfile.room_id || null,
           createdAt: userProfile.created_at,
-          updatedAt: userProfile.updated_at
+          updatedAt: userProfile.updated_at,
+          // Include student profile data if available
+          profile: userProfile.user_profiles ? {
+            admissionNumber: userProfile.user_profiles.admission_number,
+            course: userProfile.user_profiles.course,
+            batchYear: userProfile.user_profiles.batch_year,
+            dateOfBirth: userProfile.user_profiles.date_of_birth,
+            address: userProfile.user_profiles.address,
+            city: userProfile.user_profiles.city,
+            state: userProfile.user_profiles.state,
+            country: userProfile.user_profiles.country,
+            emergencyContactName: userProfile.user_profiles.emergency_contact_name,
+            emergencyContactPhone: userProfile.user_profiles.emergency_contact_phone,
+            parentName: userProfile.user_profiles.parent_name,
+            parentPhone: userProfile.user_profiles.parent_phone,
+            parentEmail: userProfile.user_profiles.parent_email,
+            aadharNumber: userProfile.user_profiles.aadhar_number,
+            bloodGroup: userProfile.user_profiles.blood_group,
+            joinDate: userProfile.user_profiles.join_date,
+            profileStatus: userProfile.user_profiles.profile_status,
+            status: userProfile.user_profiles.status,
+            bio: userProfile.user_profiles.bio,
+            avatarUrl: userProfile.user_profiles.avatar_url,
+            pincode: userProfile.user_profiles.pincode,
+            admissionNumberVerified: userProfile.user_profiles.admission_number_verified,
+            parentContactLocked: userProfile.user_profiles.parent_contact_locked
+          } : null
         }
       }
     });
@@ -643,7 +682,7 @@ router.put('/me', authMiddleware, [
     let { data: userProfile, error } = await supabase
       .from('users')
       .select('*')
-      .eq('id', req.user.id)
+      .eq('auth_uid', req.user.id)
       .single();
 
     // If user profile doesn't exist, create it first
@@ -651,12 +690,12 @@ router.put('/me', authMiddleware, [
       const { data: newProfile, error: createError } = await supabase
         .from('users')
         .insert({
-          id: req.user.id,
+          auth_uid: req.user.id,
           email: req.user.email,
           full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
           phone: req.user.user_metadata?.phone || null, // Extract phone from metadata
           role: req.user.user_metadata?.role || 'student', // Use role from metadata or default to student
-          password_hash: null, // OAuth users don't have password hashes
+          password_hash: 'oauth_user', // Placeholder for OAuth users
           ...updates // Include any updates in the initial creation
         })
         .select()
@@ -673,7 +712,7 @@ router.put('/me', authMiddleware, [
       const { data: updatedProfile, error: updateError } = await supabase
         .from('users')
         .update(updates)
-        .eq('id', req.user.id)
+        .eq('auth_uid', req.user.id)
         .select()
         .single();
 

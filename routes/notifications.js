@@ -6,6 +6,66 @@ const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
+// Broadcast a payment due notification to student and parent by admission number
+router.post('/broadcast-payment-due', authMiddleware, [
+  body('admission_number').notEmpty(),
+  body('amount').isFloat({ min: 0 }),
+  body('payment_type').notEmpty(),
+  body('payment_id').notEmpty(),
+  body('due_date').notEmpty(),
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { admission_number, amount, payment_type, payment_id, due_date } = req.body;
+
+  // Find the student user by admission number
+  const { data: studentUser, error: studentErr } = await supabase
+    .from('users')
+    .select('id')
+    .eq('admission_number', admission_number)
+    .single();
+
+  if (studentErr || !studentUser) {
+    throw new ValidationError('Student not found for admission number');
+  }
+
+  const notifications = [];
+
+  // Notify student
+  notifications.push({
+    user_id: studentUser.id,
+    title: 'Payment Due',
+    message: `₹${amount} due for ${payment_type.replace('_',' ')} (ID: ${payment_id}) by ${new Date(due_date).toLocaleDateString()}`,
+    type: 'payment_due'
+  });
+
+  // Find parent linked to this student
+  const { data: parentLink } = await supabase
+    .from('parents')
+    .select('user_id, verified')
+    .eq('student_profile_id', studentUser.id)
+    .single();
+
+  if (parentLink && parentLink.user_id && parentLink.verified) {
+    notifications.push({
+      user_id: parentLink.user_id,
+      title: 'Child Payment Due',
+      message: `₹${amount} due for ${payment_type.replace('_',' ')} (ID: ${payment_id}) by ${new Date(due_date).toLocaleDateString()}`,
+      type: 'payment_due'
+    });
+  }
+
+  if (notifications.length > 0) {
+    await supabase.from('notifications').insert(notifications);
+  }
+
+  res.json({ success: true, message: 'Notifications queued' });
+}));
+
+// Additional notification routes
 /**
  * @route   GET /api/notifications
  * @desc    Get user's notifications
@@ -13,7 +73,8 @@ const router = express.Router();
  */
 router.get('/', authMiddleware, [
   query('is_read').optional().isBoolean(),
-  query('type').optional().isIn(['payment', 'complaint', 'leave', 'maintenance', 'general']),
+  // Allow additional types used by frontend
+  query('type').optional().isIn(['payment', 'payment_due', 'room_allocation', 'complaint', 'leave', 'maintenance', 'general']),
   query('limit').optional().isInt({ min: 1, max: 100 }),
   query('offset').optional().isInt({ min: 0 })
 ], asyncHandler(async (req, res) => {
@@ -84,6 +145,8 @@ router.put('/:id/read', authMiddleware, asyncHandler(async (req, res) => {
     data: { notification }
   });
 }));
+// include payment_due and room_allocation
+query('type').optional().isIn(['payment', 'payment_due', 'room_allocation', 'complaint', 'leave', 'maintenance', 'general']),
 
 /**
  * @route   PUT /api/notifications/mark-all-read

@@ -72,7 +72,42 @@ JWT_EXPIRE=30d`;
   return true;
 }
 
-module.exports = { checkConfiguration };
+async function ensureBootstrapAdmin() {
+  const { supabase } = require('../config/supabase');
+  try {
+    const adminEmail = 'admin@test.com';
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', adminEmail)
+      .single();
+
+    if (existing) {
+      return { created: false };
+    }
+
+    const { data: newAdmin, error } = await supabase
+      .from('users')
+      .insert({
+        email: adminEmail,
+        full_name: 'System Administrator',
+        role: 'admin',
+        status: 'available'
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    console.log('✅ Bootstrap admin created:', adminEmail);
+    return { created: true, admin: newAdmin };
+  } catch (e) {
+    console.warn('Admin bootstrap skipped:', e.message);
+    return { created: false, error: e.message };
+  }
+}
+
+module.exports = { checkConfiguration, ensureBootstrapAdmin };
 
 // Run check if called directly
 if (require.main === module) {

@@ -9,12 +9,26 @@ const configureRoutes = (app) => {
   const leaveRequestsRoutes = require('../routes/leave-requests');
   const roomsRoutes = require('../routes/rooms');
   const notificationsRoutes = require('../routes/notifications');
+  const messagesRoutes = require('../routes/messages');
   const adminRoutes = require('../routes/admin');
   const roomAllocationsRoutes = require('../routes/room-allocations');
   const roomAllocationRoutes = require('../routes/room-allocation');
   const operationsRoutes = require('../routes/operations');
   const aadharVerificationRoutes = require('../routes/aadhar-verification');
   const userProfilesRoutes = require('../routes/user-profiles');
+  const hostelAssistantRoutes = require('../routes/staff'); // Renamed from staff to hostel_assistant
+  const parentsRoutes = require('../routes/parents');
+  const parcelsRoutes = require('../routes/parcels');
+  const feedbackRoutes = require('../routes/feedback');
+  const staffManagementRoutes = require('../routes/staff-management');
+  const admissionRegistryRoutes = require('../routes/admission-registry');
+  const roomManagementRoutes = require('../routes/room-management');
+  const roomRequestsRoutes = require('../routes/room-requests');
+  const parentVerificationRoutes = require('../routes/parent-verification');
+  const parcelManagementRoutes = require('../routes/parcel-management');
+  const cleaningManagementRoutes = require('../routes/cleaning-management');
+  const studentProfileRoutes = require('../routes/student-profile');
+  const authHooksRoutes = require('../routes/auth-hooks');
 
   // Health check endpoint
   app.get('/health', (req, res) => {
@@ -34,12 +48,28 @@ const configureRoutes = (app) => {
   app.use('/api/leave-requests', leaveRequestsRoutes);
   app.use('/api/rooms', roomsRoutes);
   app.use('/api/notifications', notificationsRoutes);
+  app.use('/api/messages', messagesRoutes);
   app.use('/api/admin', adminRoutes);
   app.use('/api/room-allocations', roomAllocationsRoutes);
   app.use('/api/room-allocation', roomAllocationRoutes);
   app.use('/api/operations', operationsRoutes);
   app.use('/api/aadhar-verification', aadharVerificationRoutes);
   app.use('/api/user-profiles', userProfilesRoutes);
+  app.use('/api/hostel_assistant', hostelAssistantRoutes);
+  app.use('/api/parents', parentsRoutes);
+  app.use('/api/parcels', parcelsRoutes);
+  app.use('/api/feedback', feedbackRoutes);
+  app.use('/api/staff-management', staffManagementRoutes);
+  app.use('/api/admission-registry', admissionRegistryRoutes);
+  app.use('/api/room-management', roomManagementRoutes);
+  app.use('/api/room-requests', roomRequestsRoutes);
+  app.use('/api/parent-verification', parentVerificationRoutes);
+  app.use('/api/parcel-management', parcelManagementRoutes);
+  app.use('/api/cleaning-management', cleaningManagementRoutes);
+  // Supabase Auth Hooks endpoint (Signup/Invite)
+  app.use('/api/auth-hooks', authHooksRoutes);
+  // Student Profile endpoint
+  app.use('/api/student-profile', studentProfileRoutes);
 
   // 404 handler
   app.use('*', (req, res) => {

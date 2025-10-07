@@ -12,7 +12,7 @@ const adminMiddleware = async (req, res, next) => {
     const { data: userProfile, error } = await supabase
       .from('users')
       .select('role')
-      .eq('id', req.user.id)
+      .eq('auth_uid', req.user.id)
       .single();
 
     if (error || !userProfile || !['admin', 'hostel_operations_assistant'].includes(userProfile.role)) {
@@ -27,51 +27,77 @@ const adminMiddleware = async (req, res, next) => {
 
 /**
  * @route   POST /api/room-allocation/rooms
- * @desc    Admin adds a new room
+ * @desc    Admin adds a new room or generates bulk rooms
  * @access  Private (Admin only)
  */
-router.post('/rooms', authMiddleware, adminMiddleware, [
-  body('room_number').notEmpty().withMessage('Room number is required'),
-  body('floor').optional().isInt({ min: 0 }).withMessage('Floor must be a positive integer'),
-  body('room_type').optional().isIn(['standard', 'deluxe', 'premium', 'suite']).withMessage('Invalid room type'),
-  body('capacity').isInt({ min: 1 }).withMessage('Capacity must be at least 1'),
-  body('price').optional().isFloat({ min: 0 }).withMessage('Price must be positive'),
-  body('amenities').optional().isArray().withMessage('Amenities must be an array')
-], asyncHandler(async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    throw new ValidationError('Validation failed', errors.array());
-  }
+router.post('/rooms', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
+  const { rooms, generate_bulk, block } = req.body;
 
-  const { room_number, floor, room_type, capacity, price, amenities } = req.body;
+  // Handle bulk room generation
+  if (generate_bulk && rooms && Array.isArray(rooms)) {
+    try {
+      // Insert all rooms in batch
+      const { data: createdRooms, error } = await supabase
+        .from('rooms')
+        .insert(rooms)
+        .select();
 
-  const { data: room, error } = await supabase
-    .from('rooms')
-    .insert({
+      if (error) {
+        console.error('Bulk room creation error:', error);
+        throw new ValidationError('Failed to create rooms in bulk');
+      }
+
+      res.status(201).json({
+        success: true,
+        message: `Successfully created ${createdRooms.length} rooms for Block ${block}`,
+        data: { 
+          rooms: createdRooms,
+          count: createdRooms.length,
+          block: block
+        }
+      });
+    } catch (error) {
+      throw new ValidationError('Failed to create rooms in bulk');
+    }
+  } else {
+    // Handle single room creation (existing logic)
+    const { room_number, floor, room_type, capacity, price, amenities, monthly_rent, status } = req.body;
+
+    if (!room_number || !floor || !room_type || !capacity) {
+      throw new ValidationError('Room number, floor, room type, and capacity are required');
+    }
+
+    const roomData = {
       room_number,
-      floor,
-      room_type: room_type || 'standard',
-      capacity,
-      price,
+      floor: parseInt(floor),
+      room_type,
+      capacity: parseInt(capacity),
+      price: price || monthly_rent,
       amenities: amenities || [],
       occupied: 0,
-      status: 'available'
-    })
-    .select()
-    .single();
+      current_occupancy: 0,
+      status: status || 'available'
+    };
 
-  if (error) {
-    if (error.code === '23505') {
-      throw new ValidationError('Room number already exists');
+    const { data: room, error } = await supabase
+      .from('rooms')
+      .insert(roomData)
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === '23505') {
+        throw new ValidationError('Room number already exists');
+      }
+      throw new ValidationError('Failed to create room');
     }
-    throw new ValidationError('Failed to create room');
-  }
 
-  res.status(201).json({
-    success: true,
-    message: 'Room created successfully',
-    data: { room }
-  });
+    res.status(201).json({
+      success: true,
+      message: 'Room created successfully',
+      data: { room }
+    });
+  }
 }));
 
 /**
@@ -195,6 +221,7 @@ router.post('/request', authMiddleware, [
   body('preferred_floor').optional().isInt({ min: 0 }),
   body('preferred_amenities').optional().isArray().withMessage('Preferred amenities must be an array'),
   body('special_requirements').optional().isString(),
+  body('requested_room_id').optional().isUUID(),
   body('expires_at').optional().isISO8601()
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -202,7 +229,7 @@ router.post('/request', authMiddleware, [
     throw new ValidationError('Validation failed', errors.array());
   }
 
-  const { preferred_room_type, preferred_floor, preferred_amenities, special_requirements, expires_at } = req.body;
+  const { preferred_room_type, preferred_floor, preferred_amenities, special_requirements, requested_room_id, expires_at } = req.body;
 
   // Check if user already has an active request
   const { data: existingRequest, error: checkError } = await supabase
@@ -220,7 +247,7 @@ router.post('/request', authMiddleware, [
   const { data: userProfile, error: userError } = await supabase
     .from('users')
     .select('room_id')
-    .eq('id', req.user.id)
+    .eq('auth_uid', req.user.id)
     .single();
 
   if (userProfile?.room_id) {
@@ -228,11 +255,17 @@ router.post('/request', authMiddleware, [
   }
 
   // Prepare insert data, excluding preferred_amenities if column doesn't exist
+  let specialRequirementsFinal = special_requirements || null;
+  if (requested_room_id) {
+    const tag = `REQUESTED_ROOM_ID:${requested_room_id}`;
+    specialRequirementsFinal = specialRequirementsFinal ? `${specialRequirementsFinal}\n${tag}` : tag;
+  }
+
   const insertData = {
     user_id: req.user.id,
     preferred_room_type,
     preferred_floor,
-    special_requirements,
+    special_requirements: specialRequirementsFinal,
     expires_at: expires_at ? new Date(expires_at) : null
   };
 
@@ -307,12 +340,14 @@ router.get('/requests', authMiddleware, adminMiddleware, [
     .from('room_requests')
     .select(`
       *,
-      users!room_requests_user_id_fkey(
+      user_profiles!room_requests_user_id_fkey(
         id,
         full_name,
         email,
         phone,
-        user_profiles(admission_number, course, batch_year)
+        admission_number,
+        course,
+        batch_year
       )
     `)
     .order('priority_score', { ascending: false })
@@ -367,6 +402,34 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
     throw new ValidationError(`Room request is not approvable (current status: ${request.status})`);
   }
 
+  // If the student requested a specific room, enforce it here
+  let requestedRoomId = null;
+  if (request.special_requirements && typeof request.special_requirements === 'string') {
+    const match = request.special_requirements.match(/REQUESTED_ROOM_ID:([0-9a-fA-F-]{36})/);
+    if (match) requestedRoomId = match[1];
+  }
+
+  if (requestedRoomId && requestedRoomId !== room_id) {
+    throw new ValidationError('This request must be approved only for the specifically requested room');
+  }
+
+  // Legacy compatibility: if only a room number was mentioned in special_requirements,
+  // enforce that the approved room matches that room number.
+  if (!requestedRoomId && request.special_requirements && typeof request.special_requirements === 'string') {
+    const numMatch = request.special_requirements.match(/Room\s+(\d+)/i);
+    if (numMatch && numMatch[1]) {
+      const requestedNumber = numMatch[1];
+      const { data: reqRoomByNumber } = await supabase
+        .from('rooms')
+        .select('id')
+        .eq('room_number', requestedNumber)
+        .maybeSingle();
+      if (reqRoomByNumber && reqRoomByNumber.id && reqRoomByNumber.id !== room_id) {
+        throw new ValidationError('This request is for a specific room number and must be approved for that room');
+      }
+    }
+  }
+
   // Check if room is available
   const { data: room, error: roomError } = await supabase
     .from('rooms')
@@ -410,32 +473,69 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
     });
 
   if (syncError) {
-    console.error('Failed to sync allocation tables:', syncError);
-    // Fallback manual sync to recover when DB function is out-of-date
-    // 1) Ensure no active allocation
-    const { data: existingAllocation, error: checkError } = await supabase
-      .from('room_assignments')
-      .select('*')
-      .eq('user_id', request.user_id)
-      .eq('is_active', true)
-      .single();
-    if (checkError && checkError.code !== 'PGRST116') {
-      throw new ValidationError('Failed to check existing allocation');
-    }
-    if (!existingAllocation) {
-      const { data: allocation, error: allocationError } = await supabase
-        .from('room_assignments')
-        .insert({
-          user_id: request.user_id,
-          room_id: room_id,
-          hostel_id: null,
-          start_date: new Date().toISOString().slice(0, 10),
-          is_active: true
-        })
-        .select()
+    console.error('Failed to sync allocation tables (RPC sync_allocation_tables):', syncError);
+    // Fallback manual sync to recover when DB function or expected tables are out-of-date
+    // 1) Ensure no active allocation. Prefer new table `room_allocations`,
+    //    gracefully fall back to legacy `room_assignments` when present.
+    let existingAllocation = null;
+    // Try new schema first
+    try {
+      const { data, error: raErr } = await supabase
+        .from('room_allocations')
+        .select('*')
+        .eq('user_id', request.user_id)
+        .eq('status', 'active')
         .single();
-      if (allocationError) {
-        throw new ValidationError('Failed to create room allocation');
+      if (!raErr) existingAllocation = data;
+    } catch (_) { /* ignore */ }
+
+    // If not found and/or table missing, try legacy schema
+    if (!existingAllocation) {
+      const { data: legacyAlloc, error: legacyCheckErr } = await supabase
+        .from('room_assignments')
+        .select('*')
+        .eq('user_id', request.user_id)
+        .eq('is_active', true)
+        .single();
+      if (legacyCheckErr && legacyCheckErr.code && legacyCheckErr.code !== 'PGRST116' && legacyCheckErr.code !== '42P01') {
+        // 42P01: relation does not exist (missing legacy table) – treat as no allocation
+        throw new ValidationError('Failed to check existing allocation');
+      }
+      existingAllocation = legacyAlloc || null;
+    }
+
+    // Create allocation in whichever table exists
+    if (!existingAllocation) {
+      // Try new schema first
+      let created = false;
+      const startDate = new Date().toISOString();
+      try {
+        const { error: createNewErr } = await supabase
+          .from('room_allocations')
+          .insert({
+            user_id: request.user_id,
+            room_id: room_id,
+            allocated_at: startDate,
+            allocated_by: req.user.id,
+            allocation_type: 'manual',
+            status: 'active'
+          });
+        if (!createNewErr) created = true;
+      } catch (_) { /* ignore */ }
+
+      if (!created) {
+        const { error: allocationError } = await supabase
+          .from('room_assignments')
+          .insert({
+            user_id: request.user_id,
+            room_id: room_id,
+            hostel_id: null,
+            start_date: startDate.slice(0, 10),
+            is_active: true
+          });
+        if (allocationError && allocationError.code !== '42P01') {
+          throw new ValidationError('Failed to create room allocation');
+        }
       }
     }
 
@@ -490,10 +590,130 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
     }
   }
 
+  // Create payment notification for student and parent
+  try {
+    const { data: studentProfile } = await supabase
+      .from('users')
+      .select('full_name, email, admission_number')
+      .eq('id', request.user_id)
+      .single();
+
+    if (studentProfile) {
+      // Create payment record for the allocated room
+      const { data: paymentRecord } = await supabase
+        .from('payments')
+        .insert({
+          user_id: request.user_id,
+          amount: room.price * 12, // Annual payment
+          payment_type: 'room_rent',
+          payment_status: 'pending',
+          due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days from now
+          description: `Annual room rent for Room ${room.room_number} (${room.room_type})`,
+          metadata: {
+            room_id: room_id,
+            room_number: room.room_number,
+            room_type: room.room_type,
+            monthly_rent: room.price,
+            annual_amount: room.price * 12,
+            allocation_date: new Date().toISOString()
+          }
+        })
+        .select()
+        .single();
+
+      // Send notification to student
+      const { data: studentNotification } = await supabase
+        .from('notifications')
+        .insert({
+          user_id: request.user_id,
+          title: 'Room Allocation Approved',
+          message: `Your room request for Room ${room.room_number} has been approved! Annual payment of ₹${room.price * 12} is due within 30 days.`,
+          type: 'room_allocation',
+          metadata: {
+            room_id: room_id,
+            room_number: room.room_number,
+            payment_id: paymentRecord?.id,
+            amount: room.price * 12
+          }
+        })
+        .select()
+        .single();
+
+      // Send notification to parent if linked
+      const { data: parentLink } = await supabase
+        .from('parents')
+        .select('user_id, verified')
+        .eq('student_profile_id', request.user_id)
+        .eq('verified', true)
+        .single();
+
+      if (parentLink?.user_id) {
+        await supabase
+          .from('notifications')
+          .insert({
+            user_id: parentLink.user_id,
+            title: 'Room Allocation - Payment Due',
+            message: `Your child ${studentProfile.full_name} has been allocated Room ${room.room_number}. Annual payment of ₹${room.price * 12} is due within 30 days.`,
+            type: 'payment_due',
+            metadata: {
+              student_name: studentProfile.full_name,
+              student_id: request.user_id,
+              room_id: room_id,
+              room_number: room.room_number,
+              payment_id: paymentRecord?.id,
+              amount: room.price * 12
+            }
+          });
+      }
+
+      // Create yearly payment schedule
+      const currentYear = new Date().getFullYear();
+      const paymentSchedule = [];
+      
+      for (let month = 1; month <= 12; month++) {
+        const dueDate = new Date(currentYear, month - 1, 1);
+        if (dueDate > new Date()) {
+          paymentSchedule.push({
+            user_id: request.user_id,
+            amount: room.price,
+            payment_type: 'monthly_rent',
+            payment_status: 'pending',
+            due_date: dueDate.toISOString(),
+            description: `Monthly rent for Room ${room.room_number} - ${dueDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`,
+            metadata: {
+              room_id: room_id,
+              room_number: room.room_number,
+              room_type: room.room_type,
+              year: currentYear,
+              month: month,
+              schedule_type: 'monthly'
+            }
+          });
+        }
+      }
+
+      if (paymentSchedule.length > 0) {
+        await supabase
+          .from('payments')
+          .insert(paymentSchedule);
+      }
+    }
+  } catch (notificationError) {
+    console.error('Error creating payment notifications:', notificationError);
+    // Don't fail the room allocation if notifications fail
+  }
+
+  // Fetch the updated request (with allocated_room details) for response
+  const { data: refreshedRequest } = await supabase
+    .from('room_requests')
+    .select(`*, allocated_room:rooms!room_requests_allocated_room_id_fkey(id, room_number, floor, room_type, price)`) 
+    .eq('id', id)
+    .single();
+
   res.json({
     success: true,
-    message: 'Room request approved successfully',
-    data: { request: updatedRequest }
+    message: 'Room request approved successfully and payment notifications sent',
+    data: { request: refreshedRequest || request }
   });
 }));
 
@@ -548,12 +768,14 @@ router.get('/requests/:id', authMiddleware, adminMiddleware, asyncHandler(async 
     .from('room_requests')
     .select(`
       *,
-      users!room_requests_user_id_fkey(
+      user_profiles!room_requests_user_id_fkey(
         id,
         full_name,
         email,
         phone,
-        user_profiles(admission_number, course, batch_year)
+        admission_number,
+        course,
+        batch_year
       ),
       allocated_room:rooms!room_requests_allocated_room_id_fkey(
         id,

@@ -13,7 +13,7 @@ const operationsMiddleware = async (req, res, next) => {
     const { data: userProfile, error } = await supabase
       .from('users')
       .select('role')
-      .eq('id', req.user.id)
+      .eq('auth_uid', req.user.id)
       .single();
 
     if (error || !userProfile) {
