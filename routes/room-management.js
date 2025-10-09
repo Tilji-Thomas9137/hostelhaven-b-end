@@ -489,7 +489,7 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
     // Check if room exists
     const { data: existingRoom, error: fetchError } = await supabase
       .from('rooms')
-      .select('id, room_number, current_occupancy')
+      .select('id, room_number, current_occupancy, room_type, capacity')
       .eq('id', id)
       .single();
 
@@ -519,13 +519,55 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
       }
     }
 
+    // Validate status based on current room status and occupancy
+    if (status) {
+      const currentStatus = existingRoom.status?.toLowerCase();
+      const occupied = existingRoom.current_occupancy || 0;
+      const capacity = existingRoom.capacity || 1;
+      
+      console.log('Validating status update:', { 
+        roomId: id, 
+        roomNumber: existingRoom.room_number,
+        currentStatus: currentStatus,
+        occupied: occupied,
+        capacity: capacity,
+        newStatus: status
+      });
+      
+      let validStatuses = [];
+      
+      // Status update rules based on current status and occupancy
+      if (currentStatus === 'full') {
+        // Full rooms cannot be updated unless room requests are cancelled
+        throw new ValidationError('Cannot update full room status. Please cancel room requests first.');
+      } else if (currentStatus === 'available') {
+        // Available rooms can be changed to any status
+        validStatuses = ['occupied', 'partially_filled', 'full', 'maintenance'];
+      } else if (currentStatus === 'partially_filled') {
+        // Partially filled rooms can only change to full or remain partially filled
+        validStatuses = ['full', 'partially_filled'];
+      } else if (currentStatus === 'occupied') {
+        // Occupied rooms can only change to full or remain occupied
+        validStatuses = ['full', 'occupied'];
+      } else {
+        // For maintenance or other statuses, allow all options
+        validStatuses = ['available', 'occupied', 'partially_filled', 'full', 'maintenance'];
+      }
+      
+      console.log('Valid statuses for current status', currentStatus, ':', validStatuses);
+      
+      if (!validStatuses.includes(status.toLowerCase())) {
+        throw new ValidationError(`Cannot change status from '${currentStatus}' to '${status}'. Valid options: ${validStatuses.join(', ')}`);
+      }
+    }
+
     // Update the room
     const updateData = {
       ...(room_number && { room_number }),
       ...(floor && { floor: parseInt(floor) }),
       ...(room_type && { room_type, capacity }),
       ...(monthly_rent && { price: parseFloat(monthly_rent) }),
-      ...(status && { status }),
+      ...(status && { status: status.toLowerCase() }),
       updated_at: new Date().toISOString()
     };
 
@@ -537,6 +579,7 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
       .single();
 
     if (updateError) {
+      console.error('Database update error:', updateError);
       throw new Error(`Failed to update room: ${updateError.message}`);
     }
 

@@ -29,8 +29,8 @@ router.post('/send-otp', [
     // Check if parent exists in parents table
     const { data: parent, error: parentError } = await supabase
       .from('parents')
-      .select('id, parent_email, verified')
-      .eq('parent_email', email)
+      .select('id, email, verified')
+      .eq('email', email)
       .single();
 
     if (parentError || !parent) {
@@ -114,14 +114,11 @@ router.post('/verify-otp', [
       .from('parents')
       .select(`
         id,
-        admission_number,
-        parent_name,
-        parent_email,
-        parent_phone,
-        parent_relation,
+        email,
+        phone,
         verified
       `)
-      .eq('parent_email', email)
+      .eq('email', email)
       .single();
 
     if (parentError || !parent) {
@@ -133,12 +130,52 @@ router.post('/verify-otp', [
     try {
       const { data: existingAuth } = await supabaseAdmin.auth.admin.getUserByEmail(email);
       authUser = existingAuth.user;
+      
+      // If user exists, make sure they have a record in the users table
+      const { data: existingUser } = await supabase
+        .from('users')
+        .select('*')
+        .eq('auth_uid', authUser.id)
+        .single();
+        
+      if (!existingUser) {
+        // Create user record if it doesn't exist
+        const { data: newUser, error: userCreateError } = await supabase
+          .from('users')
+          .insert({
+            auth_uid: authUser.id,
+            email: email,
+            role: 'parent',
+            status: 'active',
+            full_name: parent.email.split('@')[0]
+          })
+          .select()
+          .single();
+
+        if (userCreateError) {
+          console.warn(`Failed to create user record: ${userCreateError.message}`);
+        } else if (newUser) {
+          // Update the parent record to link with the user
+          const { error: parentUpdateError } = await supabase
+            .from('parents')
+            .update({ user_id: newUser.id })
+            .eq('id', parent.id);
+
+          if (parentUpdateError) {
+            console.warn(`Failed to link parent to user: ${parentUpdateError.message}`);
+          }
+        }
+      }
     } catch (error) {
       // Parent doesn't have auth account, create one
       const { data: newAuthUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
         email: email,
         password: crypto.randomBytes(32).toString('hex'), // Random password
-        email_confirm: true
+        email_confirm: true,
+        user_metadata: {
+          role: 'parent',
+          full_name: parent.email.split('@')[0] // Use email prefix as name
+        }
       });
 
       if (createError) {
@@ -146,6 +183,33 @@ router.post('/verify-otp', [
       }
 
       authUser = newAuthUser.user;
+
+      // Create user record in users table
+      const { data: newUser, error: userCreateError } = await supabase
+        .from('users')
+        .insert({
+          auth_uid: authUser.id,
+          email: email,
+          role: 'parent',
+          status: 'active',
+          full_name: parent.email.split('@')[0]
+        })
+        .select()
+        .single();
+
+      if (userCreateError) {
+        console.warn(`Failed to create user record: ${userCreateError.message}`);
+      } else if (newUser) {
+        // Update the parent record to link with the new user
+        const { error: parentUpdateError } = await supabase
+          .from('parents')
+          .update({ user_id: newUser.id })
+          .eq('id', parent.id);
+
+        if (parentUpdateError) {
+          console.warn(`Failed to link parent to user: ${parentUpdateError.message}`);
+        }
+      }
     }
 
     // Update parent verification status
@@ -163,10 +227,13 @@ router.post('/verify-otp', [
       }
     }
 
-    // Generate session token
-    const { data: session, error: sessionError } = await supabaseAdmin.auth.admin.generateLink({
+    // Generate a proper session using admin client
+    const { data: sessionData, error: sessionError } = await supabaseAdmin.auth.admin.generateLink({
       type: 'magiclink',
-      email: email
+      email: email,
+      options: {
+        redirectTo: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/parent-dashboard`
+      }
     });
 
     if (sessionError) {
@@ -184,7 +251,7 @@ router.post('/verify-otp', [
           verified: true
         },
         auth_uid: authUser.id,
-        session_url: session.properties?.action_link,
+        session_url: sessionData.properties?.action_link,
         message: 'OTP verified successfully'
       }
     });
@@ -203,8 +270,8 @@ router.get('/child-info', authMiddleware, asyncHandler(async (req, res) => {
     // Get parent details
     const { data: parent, error: parentError } = await supabase
       .from('parents')
-      .select('admission_number, parent_email, verified')
-      .eq('parent_email', req.user.email)
+      .select('id, email, verified')
+      .eq('email', req.user.email)
       .single();
 
     if (parentError || !parent) {
@@ -215,36 +282,30 @@ router.get('/child-info', authMiddleware, asyncHandler(async (req, res) => {
       throw new AuthorizationError('Parent account not verified');
     }
 
-    // Get child's admission details
-    const { data: child, error: childError } = await supabase
-      .from('admission_registry')
+    // Get child's user profile through parent relationship
+    const { data: childProfile, error: childError } = await supabase
+      .from('parents')
       .select(`
-        admission_number,
-        full_name,
-        email,
-        phone,
-        course,
-        year,
-        address,
-        status
+        user_profiles!inner(
+          *,
+          users!inner(full_name, email, phone)
+        )
       `)
-      .eq('admission_number', parent.admission_number)
+      .eq('email', req.user.email)
       .single();
+
+    if (childError || !childProfile) {
+      throw new ValidationError('Child information not found');
+    }
+
+    const child = childProfile.user_profiles;
 
     if (childError || !child) {
       throw new ValidationError('Child information not found');
     }
 
-    // Get child's user profile if exists
-    const { data: userProfile } = await supabase
-      .from('user_profiles')
-      .select(`
-        id,
-        room_id,
-        status
-      `)
-      .eq('admission_number', parent.admission_number)
-      .single();
+    // Get child's room details if exists
+    const userProfile = child;
 
     // Get room details if child has room
     let roomDetails = null;
@@ -290,8 +351,8 @@ router.get('/child-leave-history', authMiddleware, asyncHandler(async (req, res)
     // Get parent details
     const { data: parent, error: parentError } = await supabase
       .from('parents')
-      .select('admission_number, verified')
-      .eq('parent_email', req.user.email)
+      .select('id, verified')
+      .eq('email', req.user.email)
       .single();
 
     if (parentError || !parent || !parent.verified) {
@@ -302,7 +363,7 @@ router.get('/child-leave-history', authMiddleware, asyncHandler(async (req, res)
     const { data: childProfile, error: profileError } = await supabase
       .from('user_profiles')
       .select('id')
-      .eq('admission_number', parent.admission_number)
+      .eq('id', parent.id)
       .single();
 
     if (profileError || !childProfile) {
@@ -347,8 +408,8 @@ router.get('/child-payments', authMiddleware, asyncHandler(async (req, res) => {
     // Get parent details
     const { data: parent, error: parentError } = await supabase
       .from('parents')
-      .select('admission_number, verified')
-      .eq('parent_email', req.user.email)
+      .select('id, verified')
+      .eq('email', req.user.email)
       .single();
 
     if (parentError || !parent || !parent.verified) {
@@ -359,7 +420,7 @@ router.get('/child-payments', authMiddleware, asyncHandler(async (req, res) => {
     const { data: childProfile, error: profileError } = await supabase
       .from('user_profiles')
       .select('id')
-      .eq('admission_number', parent.admission_number)
+      .eq('id', parent.id)
       .single();
 
     if (profileError || !childProfile) {

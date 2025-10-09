@@ -102,7 +102,8 @@ const authMiddleware = async (req, res, next) => {
     }
 
     // Check if student has admission registry linkage (skip for specific routes)
-    const path = typeof req.path === 'string' ? req.path : '';
+    const rawPath = req.originalUrl || req.baseUrl || req.path || '';
+    const path = typeof rawPath === 'string' ? rawPath : '';
     const isParentRoute = path.startsWith('/api/parents');
     const allowedWithoutActivation = [
       '/api/student-profile', // students should be able to query their profile existence
@@ -112,10 +113,21 @@ const authMiddleware = async (req, res, next) => {
     ];
     const skipActivation = allowedWithoutActivation.some(p => path.startsWith(p));
     if (!isParentRoute && !skipActivation && userProfile?.role === 'student') {
+      // Fetch users.id (database id) for linking to user_profiles
+      let dbUserId = userProfile?.id;
+      if (!dbUserId) {
+        const { data: fullUser } = await supabase
+          .from('users')
+          .select('id')
+          .eq('auth_uid', user.id)
+          .maybeSingle();
+        dbUserId = fullUser?.id;
+      }
+
       const { data: studentProfile, error: studentError } = await supabase
         .from('user_profiles')
         .select('admission_number, profile_status, status')
-        .eq('user_id', userProfile.id) // Use the users table id, not auth_uid
+        .eq('user_id', dbUserId || null) // Use the users table id, not auth_uid
         .single();
 
       if (studentError || !studentProfile || studentProfile.profile_status !== 'active') {

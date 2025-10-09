@@ -103,6 +103,10 @@ router.post('/students', authMiddleware, staffMiddleware, [
   body('full_name').notEmpty().withMessage('Full name is required'),
   body('course').notEmpty().withMessage('Course is required'),
   body('year').isInt({ min: 1, max: 4 }).withMessage('Year must be between 1 and 4'),
+  body('gender').optional().isString(),
+  body('address').optional().isString(),
+  body('blood_group').optional().isString(),
+  body('date_of_birth').optional().isString(),
   body('parent_name').notEmpty().withMessage('Parent name is required'),
   body('parent_phone').notEmpty().withMessage('Parent phone is required'),
   body('parent_email').isEmail().withMessage('Valid parent email is required'),
@@ -120,6 +124,10 @@ router.post('/students', authMiddleware, staffMiddleware, [
     full_name,
     course,
     year,
+    gender,
+    address,
+    blood_group,
+    date_of_birth,
     parent_name,
     parent_phone,
     parent_email,
@@ -333,6 +341,9 @@ router.post('/students', authMiddleware, staffMiddleware, [
         parent_name: parent_name,
         parent_phone: parent_phone,
         parent_email: parent_email,
+        gender: gender || null,
+        address: address || null,
+        blood_group: blood_group || null,
         status: 'incomplete', // Student needs to complete their profile
         profile_status: 'active',
         join_date: new Date().toISOString().split('T')[0] // Set current date as join date
@@ -371,6 +382,22 @@ router.post('/students', authMiddleware, staffMiddleware, [
         } catch (rlsFixError) {
           console.error('Failed to fix RLS policy:', rlsFixError.message);
         }
+      }
+
+      // If schema is missing some columns (e.g., gender, address, blood_group, date_of_birth), retry without them
+      if (profileError && (profileError.code === '42703' || /column .* does not exist/i.test(profileError.message))) {
+        const sanitized = { ...profileData };
+        delete sanitized.gender;
+        delete sanitized.address;
+        delete sanitized.blood_group;
+        delete sanitized.date_of_birth;
+        const retry = await supabaseAdmin
+          .from('user_profiles')
+          .insert(sanitized)
+          .select()
+          .single();
+        newStudentProfile = retry.data;
+        profileError = retry.error;
       }
 
       if (profileError) {
@@ -530,6 +557,8 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
   body('full_name').optional().notEmpty().withMessage('Full name cannot be empty'),
   body('course').optional().notEmpty().withMessage('Course cannot be empty'),
   body('year').optional().isInt({ min: 1, max: 4 }).withMessage('Year must be between 1 and 4'),
+  body('gender').optional().isString(),
+  body('address').optional().isString(),
   body('parent_name').optional().notEmpty().withMessage('Parent name cannot be empty'),
   body('parent_phone').optional().notEmpty().withMessage('Parent phone cannot be empty'),
   body('parent_email').optional().isEmail().withMessage('Valid parent email is required'),
@@ -543,7 +572,7 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
   }
 
   const { admission_number } = req.params;
-  const { full_name, course, year, parent_name, parent_phone, parent_email, parent_relation, student_email, student_phone } = req.body;
+  const { full_name, course, year, gender, address, blood_group, parent_name, parent_phone, parent_email, parent_relation, student_email, student_phone } = req.body;
 
   try {
     // Check if student exists
@@ -565,6 +594,7 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
     if (parent_name) updateData.parent_name = parent_name;
     if (parent_phone) updateData.parent_phone = parent_phone;
     if (parent_email) updateData.parent_email = parent_email;
+    // Keep admission_registry minimal; store extra fields in user_profiles
     if (student_email) updateData.student_email = student_email;
     if (student_phone) updateData.student_phone = student_phone;
 
@@ -587,14 +617,30 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
     if (parent_name) profileUpdateData.parent_name = parent_name;
     if (parent_phone) profileUpdateData.parent_phone = parent_phone;
     if (parent_email) profileUpdateData.parent_email = parent_email;
+    if (gender) profileUpdateData.gender = gender;
+    if (address) profileUpdateData.address = address;
+    if (blood_group) profileUpdateData.blood_group = blood_group;
     // Note: full_name, emergency_contact_*, and other student fields are managed by student
 
     // Update user_profiles if there are changes
     if (Object.keys(profileUpdateData).length > 0) {
-      const { error: profileUpdateError } = await supabaseAdmin
+      let { error: profileUpdateError } = await supabaseAdmin
         .from('user_profiles')
         .update(profileUpdateData)
         .eq('admission_number', admission_number);
+
+      // If schema missing columns, strip and retry
+      if (profileUpdateError && (profileUpdateError.code === '42703' || /column .* does not exist/i.test(profileUpdateError.message))) {
+        const sanitized = { ...profileUpdateData };
+        delete sanitized.gender;
+        delete sanitized.address;
+        delete sanitized.blood_group;
+        const retry = await supabaseAdmin
+          .from('user_profiles')
+          .update(sanitized)
+          .eq('admission_number', admission_number);
+        profileUpdateError = retry.error;
+      }
 
       if (profileUpdateError) {
         console.warn('Failed to update user profile:', profileUpdateError.message);

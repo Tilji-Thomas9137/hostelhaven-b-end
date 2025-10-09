@@ -129,6 +129,7 @@ router.get('/', authMiddleware, asyncHandler(async (req, res) => {
       batch_year: profileData.batch_year,
       date_of_birth: profileData.date_of_birth,
       address: profileData.address,
+      gender: profileData.gender,
       city: profileData.city,
       state: profileData.state,
       country: profileData.country,

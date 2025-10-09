@@ -100,6 +100,38 @@ router.post('/activate', [
     throw new ValidationError('Failed to finalize activation');
   }
 
+  // Ensure/activate a corresponding user_profiles row for this user
+  try {
+    // Try to find an existing profile by users.id
+    const { data: existingProfile } = await supabase
+      .from('user_profiles')
+      .select('id, profile_status')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (existingProfile) {
+      if (existingProfile.profile_status !== 'active') {
+        await supabase
+          .from('user_profiles')
+          .update({ profile_status: 'active' })
+          .eq('id', existingProfile.id);
+      }
+    } else {
+      // Create a minimal profile row to link the student immediately
+      const admissionNumber = user.linked_admission_number || user.username || null;
+      await supabase
+        .from('user_profiles')
+        .insert({
+          user_id: user.id,
+          admission_number: admissionNumber,
+          profile_status: 'active',
+          status: 'incomplete'
+        });
+    }
+  } catch (e) {
+    console.warn('Activation: unable to ensure/activate user profile:', e.message);
+  }
+
   // If this is a parent account, also verify them in the parents table
   if (user.role === 'parent') {
     try {
@@ -540,40 +572,14 @@ router.post('/resend-confirmation', [
  */
 router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
   try {
+    // First, get the user from users table
     let { data: userProfile, error } = await supabase
       .from('users')
-      .select(`
-        *,
-        user_profiles(
-          admission_number,
-          course,
-          batch_year,
-          date_of_birth,
-          address,
-          city,
-          state,
-          country,
-          emergency_contact_name,
-          emergency_contact_phone,
-          parent_name,
-          parent_phone,
-          parent_email,
-          aadhar_number,
-          blood_group,
-          join_date,
-          profile_status,
-          status,
-          bio,
-          avatar_url,
-          pincode,
-          admission_number_verified,
-          parent_contact_locked
-        )
-      `)
+      .select('*')
       .eq('auth_uid', req.user.id)
       .single();
 
-    // If user profile doesn't exist, create it with default role as student
+    // If user doesn't exist, create it
     if (error || !userProfile) {
       const { data: newProfile, error: profileError } = await supabase
         .from('users')
@@ -590,10 +596,29 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
 
       if (profileError) {
         console.error('Profile creation error:', profileError);
+        console.error('Profile creation details:', {
+          auth_uid: req.user.id,
+          email: req.user.email,
+          full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0],
+          phone: req.user.user_metadata?.phone || null,
+          role: req.user.user_metadata?.role || 'student'
+        });
         throw new AuthenticationError('Failed to create user profile');
       }
 
       userProfile = newProfile;
+    }
+
+    // Now get the user_profiles data separately (optional)
+    const { data: userProfileDetails } = await supabase
+      .from('user_profiles')
+      .select('*')
+      .eq('user_id', userProfile.id)
+      .single();
+
+    // Add user_profiles data to userProfile if it exists
+    if (userProfileDetails) {
+      userProfile.user_profiles = userProfileDetails;
     }
 
     res.json({
