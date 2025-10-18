@@ -1033,19 +1033,58 @@ router.delete('/request/:requestId', authMiddleware, asyncHandler(async (req, re
     throw new AuthorizationError('User not found');
   }
 
-  // Check if user owns this request
-  const { data: request, error: checkError } = await supabase
+  // Check if user owns this request - try multiple approaches
+  let request = null;
+  let isOwner = false;
+  
+  // First try: check by user_id
+  const { data: request1, error: checkError1 } = await supabase
     .from('room_requests')
     .select('user_id, status')
     .eq('id', requestId)
     .single();
 
-  if (checkError || !request) {
+  if (!checkError1 && request1) {
+    request = request1;
+    isOwner = request.user_id === userRow.id;
+    console.log(`✅ Found request using user_id, ownership: ${isOwner}`);
+  } else if (checkError1 && (checkError1.code === '42703' || /column .*user_id.* does not exist/i.test(checkError1.message))) {
+    console.log('❌ user_id column does not exist, trying student_profile_id');
+    
+    // Get student profile
+    const { data: student } = await supabase
+      .from('user_profiles')
+      .select('id')
+      .eq('user_id', userRow.id)
+      .maybeSingle();
+    
+    if (student) {
+      // Try by student_profile_id
+      const { data: request2, error: checkError2 } = await supabase
+        .from('room_requests')
+        .select('student_profile_id, status')
+        .eq('id', requestId)
+        .single();
+      
+      if (!checkError2 && request2) {
+        request = request2;
+        isOwner = request.student_profile_id === student.id;
+        console.log(`✅ Found request using student_profile_id, ownership: ${isOwner}`);
+      } else {
+        console.log('❌ No request found using student_profile_id:', checkError2);
+        throw new ValidationError('Request not found');
+      }
+    } else {
+      throw new ValidationError('Student profile not found');
+    }
+  } else {
+    console.log('❌ Error checking request ownership:', checkError1);
     throw new ValidationError('Request not found');
   }
 
-  // Check ownership using user_id (auth_uid column doesn't exist in room_requests)
-  const isOwner = request.user_id === userRow.id;
+  if (!request) {
+    throw new ValidationError('Request not found');
+  }
   
   if (!isOwner) {
     throw new AuthorizationError('You can only delete your own requests');

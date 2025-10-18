@@ -29,6 +29,9 @@ const configureRoutes = (app) => {
   const cleaningManagementRoutes = require('../routes/cleaning-management');
   const studentProfileRoutes = require('../routes/student-profile');
   const authHooksRoutes = require('../routes/auth-hooks');
+  const studentCleaningRequestsRoutes = require('../routes/student-cleaning-requests');
+  const studentLeaveRequestsRoutes = require('../routes/student-leave-requests');
+  const studentComplaintsRoutes = require('../routes/student-complaints');
 
   // Health check endpoint
   app.get('/health', (req, res) => {
@@ -70,6 +73,10 @@ const configureRoutes = (app) => {
   app.use('/api/auth-hooks', authHooksRoutes);
   // Student Profile endpoint
   app.use('/api/student-profile', studentProfileRoutes);
+  // Student-specific endpoints
+  app.use('/api/student-cleaning-requests', studentCleaningRequestsRoutes);
+  app.use('/api/student-leave-requests', studentLeaveRequestsRoutes);
+  app.use('/api/student-complaints', studentComplaintsRoutes);
 
   // 404 handler
   app.use('*', (req, res) => {

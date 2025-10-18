@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS admission_registry (
     parent_name VARCHAR(255) NOT NULL,
     parent_email VARCHAR(255) NOT NULL,
     parent_phone VARCHAR(20) NOT NULL,
+    parent_relation VARCHAR(50),
+    student_email VARCHAR(255),
+    student_phone VARCHAR(20),
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'active', 'inactive', 'rejected')),
     added_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()

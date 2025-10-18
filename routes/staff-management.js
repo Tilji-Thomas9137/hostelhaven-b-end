@@ -163,7 +163,7 @@ router.put('/staff/:id', authMiddleware, adminOnlyMiddleware, [
   body('email').optional().isEmail().withMessage('Valid email is required'),
   body('phone').optional().notEmpty().withMessage('Phone number cannot be empty'),
   body('role').optional().isIn(['warden', 'hostel_operations_assistant']).withMessage('Invalid role'),
-  body('status').optional().isIn(['active', 'inactive']).withMessage('Invalid status')
+  body('status').optional().isIn(['active', 'inactive', 'suspended']).withMessage('Invalid status')
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {

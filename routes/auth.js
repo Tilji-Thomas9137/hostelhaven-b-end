@@ -291,9 +291,12 @@ router.post('/login', [
       }
     }
 
-    // Check if user is suspended before proceeding
-    if (userProfile && userProfile.status === 'suspended') {
-      throw new AuthenticationError('Your account has been suspended. Please contact an administrator.');
+    // Check if user is suspended or inactive before proceeding
+    if (userProfile && (userProfile.status === 'suspended' || userProfile.status === 'inactive')) {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthenticationError(statusMessage);
     }
 
     // If user profile doesn't exist, this means the user wasn't created by staff

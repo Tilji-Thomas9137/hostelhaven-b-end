@@ -11,12 +11,20 @@ const staffMiddleware = async (req, res, next) => {
   try {
     const { data: userProfile, error } = await supabase
       .from('users')
-      .select('id, role')
+      .select('id, role, status')
       .eq('auth_uid', req.user.id)
       .single();
 
     if (error || !userProfile || !['admin', 'warden', 'hostel_operations_assistant'].includes(userProfile.role)) {
       throw new AuthorizationError('Staff access required');
+    }
+
+    // Check if user account is inactive or suspended
+    if (userProfile.status === 'inactive' || userProfile.status === 'suspended') {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthorizationError(statusMessage);
     }
     
     // Set the database ID for use in route handlers
@@ -564,7 +572,8 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
   body('parent_email').optional().isEmail().withMessage('Valid parent email is required'),
   body('parent_relation').optional().notEmpty().withMessage('Parent relation cannot be empty'),
   body('student_email').optional().isEmail().withMessage('Valid student email is required'),
-  body('student_phone').optional().notEmpty().withMessage('Student phone cannot be empty')
+  body('student_phone').optional().notEmpty().withMessage('Student phone cannot be empty'),
+  body('status').optional().isIn(['pending', 'approved', 'active', 'inactive', 'rejected']).withMessage('Invalid status')
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -572,13 +581,13 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
   }
 
   const { admission_number } = req.params;
-  const { full_name, course, year, gender, address, blood_group, parent_name, parent_phone, parent_email, parent_relation, student_email, student_phone } = req.body;
+  const { full_name, course, year, gender, address, blood_group, parent_name, parent_phone, parent_email, parent_relation, student_email, student_phone, status } = req.body;
 
   try {
     // Check if student exists
     const { data: existingStudent, error: fetchError } = await supabaseAdmin
       .from('admission_registry')
-      .select('admission_number')
+      .select('admission_number, student_email')
       .eq('admission_number', admission_number)
       .single();
 
@@ -594,9 +603,9 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
     if (parent_name) updateData.parent_name = parent_name;
     if (parent_phone) updateData.parent_phone = parent_phone;
     if (parent_email) updateData.parent_email = parent_email;
-    // Keep admission_registry minimal; store extra fields in user_profiles
     if (student_email) updateData.student_email = student_email;
     if (student_phone) updateData.student_phone = student_phone;
+    if (status) updateData.status = status;
 
     // Update student record using service role to bypass RLS
     const { data: updatedStudent, error: updateError } = await supabaseAdmin
@@ -608,6 +617,34 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
 
     if (updateError) {
       throw new Error(`Failed to update student: ${updateError.message}`);
+    }
+
+    // If status is being updated, also update the users table
+    if (status) {
+      // Find the associated user account (use maybeSingle to handle no rows)
+      const { data: userAccount, error: userError } = await supabaseAdmin
+        .from('users')
+        .select('id, email')
+        .eq('email', existingStudent.student_email)
+        .maybeSingle();
+
+      if (!userError && userAccount) {
+        // Update the user status
+        const { error: userUpdateError } = await supabaseAdmin
+          .from('users')
+          .update({ status: status })
+          .eq('id', userAccount.id);
+
+        if (userUpdateError) {
+          console.warn('Failed to update user status:', userUpdateError.message);
+        } else {
+          console.log(`Updated user status to ${status} for user ${userAccount.id}`);
+        }
+      } else if (userError) {
+        console.warn('Error finding user account:', userError.message);
+      } else {
+        console.log(`No user account found for email: ${existingStudent.student_email}`);
+      }
     }
 
     // Also update the corresponding user_profiles record (admin-managed fields only)

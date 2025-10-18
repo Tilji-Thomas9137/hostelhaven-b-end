@@ -97,8 +97,11 @@ const authMiddleware = async (req, res, next) => {
       }
     }
 
-    if (userProfile?.status === 'suspended') {
-      throw new AuthenticationError('Your account has been suspended. Please contact an administrator.');
+    if (userProfile?.status === 'suspended' || userProfile?.status === 'inactive') {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthenticationError(statusMessage);
     }
 
     // Check if student has admission registry linkage (skip for specific routes)

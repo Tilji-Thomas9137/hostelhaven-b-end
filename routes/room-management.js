@@ -11,12 +11,20 @@ const staffMiddleware = async (req, res, next) => {
   try {
     const { data: userProfile, error } = await supabase
       .from('users')
-      .select('role')
+      .select('role, status')
       .eq('auth_uid', req.user.id)
       .single();
 
     if (error || !userProfile || !['admin', 'warden', 'hostel_operations_assistant'].includes(userProfile.role)) {
       throw new AuthorizationError('Staff access required');
+    }
+
+    // Check if user account is inactive or suspended
+    if (userProfile.status === 'inactive' || userProfile.status === 'suspended') {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthorizationError(statusMessage);
     }
     
     next();

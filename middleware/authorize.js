@@ -42,11 +42,14 @@ const authorize = (allowedRoles = []) => {
         });
       }
 
-      // Check if user account is active
-      if (user.status !== 'active') {
+      // Check if user account is active (block inactive and suspended)
+      if (user.status === 'inactive' || user.status === 'suspended') {
+        const statusMessage = user.status === 'suspended' 
+          ? 'Your account has been suspended. Please contact an administrator.'
+          : 'Your account is currently inactive. Please contact an administrator to activate your account.';
         return res.status(403).json({
           success: false,
-          message: 'User account is not active'
+          message: statusMessage
         });
       }
 

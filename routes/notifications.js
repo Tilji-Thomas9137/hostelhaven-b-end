@@ -218,4 +218,92 @@ router.get('/unread-count', authMiddleware, asyncHandler(async (req, res) => {
   });
 }));
 
+/**
+ * @route   POST /api/notifications/send-to-admin
+ * @desc    Send notification from staff (warden/operations) to admin
+ * @access  Private (Staff)
+ */
+router.post('/send-to-admin', authMiddleware, [
+  body('title').notEmpty().withMessage('Title is required'),
+  body('message').notEmpty().withMessage('Message is required'),
+  body('type').optional().isIn(['room_request', 'complaint', 'leave', 'maintenance', 'general']).withMessage('Invalid notification type'),
+  body('metadata').optional().isObject().withMessage('Metadata must be an object')
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { title, message, type = 'general', metadata = {} } = req.body;
+
+  try {
+    // Get the sender's information
+    const { data: sender, error: senderError } = await supabase
+      .from('users')
+      .select('id, full_name, role')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (senderError || !sender) {
+      throw new ValidationError('Sender not found');
+    }
+
+    // Check if sender is staff (warden or operations assistant)
+    if (!['warden', 'hostel_operations_assistant'].includes(sender.role)) {
+      throw new ValidationError('Only wardens and operations assistants can send notifications to admin');
+    }
+
+    // Find all admin users
+    const { data: admins, error: adminError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('role', 'admin')
+      .eq('status', 'active');
+
+    if (adminError) {
+      throw new Error(`Failed to fetch admin users: ${adminError.message}`);
+    }
+
+    if (!admins || admins.length === 0) {
+      throw new ValidationError('No active admin users found');
+    }
+
+    // Create notifications for all admins
+    const notifications = admins.map(admin => ({
+      user_id: admin.id,
+      title,
+      message: `${message} (From: ${sender.full_name} - ${sender.role.replace('_', ' ')})`,
+      type,
+      metadata: {
+        ...metadata,
+        sender_id: sender.id,
+        sender_name: sender.full_name,
+        sender_role: sender.role
+      },
+      is_read: false,
+      created_at: new Date().toISOString()
+    }));
+
+    const { data: insertedNotifications, error: insertError } = await supabase
+      .from('notifications')
+      .insert(notifications)
+      .select();
+
+    if (insertError) {
+      throw new Error(`Failed to create notifications: ${insertError.message}`);
+    }
+
+    res.json({
+      success: true,
+      message: `Notification sent to ${admins.length} admin(s)`,
+      data: {
+        notifications: insertedNotifications,
+        recipient_count: admins.length
+      }
+    });
+  } catch (error) {
+    throw error;
+  }
+}));
+
 module.exports = router;
