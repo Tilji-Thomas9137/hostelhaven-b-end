@@ -7,6 +7,115 @@ const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 
 /**
+ * @route   GET /api/rooms
+ * @desc    Get all rooms with optional filtering
+ * @access  Public
+ */
+router.get('/', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 ROOMS: Fetching rooms with query params:', req.query);
+    
+    const { room_type, status, floor, room_number } = req.query;
+    
+    let query = supabase
+      .from('rooms')
+      .select('*')
+      .order('floor')
+      .order('room_number');
+
+    if (room_type) {
+      query = query.eq('room_type', room_type);
+      console.log('🔍 ROOMS: Filtering by room_type:', room_type);
+    }
+    
+    if (status) {
+      query = query.eq('status', status);
+      console.log('🔍 ROOMS: Filtering by status:', status);
+    }
+    
+    if (floor) {
+      query = query.eq('floor', parseInt(floor));
+      console.log('🔍 ROOMS: Filtering by floor:', floor);
+    }
+    
+    if (room_number) {
+      query = query.ilike('room_number', `%${room_number}%`);
+      console.log('🔍 ROOMS: Filtering by room_number:', room_number);
+    }
+
+    const { data: rooms, error } = await query;
+
+    if (error) {
+      console.error('❌ ROOMS: Query error:', error);
+      throw new ValidationError('Failed to fetch rooms');
+    }
+
+    console.log('✅ ROOMS: Found', rooms?.length || 0, 'rooms');
+    console.log('🔍 ROOMS: Sample rooms:', rooms?.slice(0, 2));
+
+    // Add availability info
+    const roomsWithAvailability = rooms.map(room => {
+      const occupied = room.current_occupancy || 0;
+      return {
+        ...room,
+        available_spots: room.capacity - occupied,
+        is_available: occupied < room.capacity && (room.status === 'available' || room.status === 'partially_filled')
+      };
+    });
+
+    res.json({
+      success: true,
+      data: { rooms: roomsWithAvailability }
+    });
+  } catch (error) {
+    console.error('❌ ROOMS: Error:', error);
+    throw error;
+  }
+}));
+
+/**
+ * @route   GET /api/rooms/test
+ * @desc    Test endpoint to check rooms table
+ * @access  Public
+ */
+router.get('/test', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 ROOMS TEST: Testing rooms table...');
+    
+    // Get all rooms without any filters
+    const { data: rooms, error } = await supabase
+      .from('rooms')
+      .select('*')
+      .limit(10);
+
+    if (error) {
+      console.error('❌ ROOMS TEST: Query error:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+        details: error
+      });
+    }
+
+    console.log('✅ ROOMS TEST: Found', rooms?.length || 0, 'rooms');
+
+    res.json({
+      success: true,
+      count: rooms?.length || 0,
+      rooms: rooms || [],
+      message: `Found ${rooms?.length || 0} rooms in database`
+    });
+  } catch (error) {
+    console.error('❌ ROOMS TEST: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+  }
+}));
+
+/**
  * @route   GET /api/rooms/my-room
  * @desc    Get current user's room details
  * @access  Private

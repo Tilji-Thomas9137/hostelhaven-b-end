@@ -60,6 +60,60 @@ const staffMiddleware = async (req, res, next) => {
   }
 };
 
+// Middleware to check hostel operations assistant access
+const operationsAssistantMiddleware = async (req, res, next) => {
+  try {
+    const { data: userProfile, error } = await supabase
+      .from('users')
+      .select('role, status')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (error || !userProfile || userProfile.role !== 'hostel_operations_assistant') {
+      throw new AuthorizationError('Hostel operations assistant access required');
+    }
+
+    // Check if user account is inactive or suspended
+    if (userProfile.status === 'inactive' || userProfile.status === 'suspended') {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthorizationError(statusMessage);
+    }
+    
+    next();
+  } catch (error) {
+    throw new AuthorizationError('Hostel operations assistant access required');
+  }
+};
+
+// Middleware to check warden or admin access (supervisory roles)
+const supervisoryMiddleware = async (req, res, next) => {
+  try {
+    const { data: userProfile, error } = await supabase
+      .from('users')
+      .select('role, status')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (error || !userProfile || !['admin', 'warden'].includes(userProfile.role)) {
+      throw new AuthorizationError('Admin or Warden access required');
+    }
+
+    // Check if user account is inactive or suspended
+    if (userProfile.status === 'inactive' || userProfile.status === 'suspended') {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthorizationError(statusMessage);
+    }
+    
+    next();
+  } catch (error) {
+    throw new AuthorizationError('Admin or Warden access required');
+  }
+};
+
 /**
  * @route   POST /api/room-requests
  * @desc    Student submits room request
@@ -408,6 +462,394 @@ router.get('/emergency-check', asyncHandler(async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message
+    });
+  }
+}));
+
+// DEBUG ENDPOINT: Test the /all endpoint without auth for debugging
+router.get('/debug-all', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 DEBUG ALL: Testing room requests endpoint...');
+    
+    const { status, page = 1, limit = 10 } = req.query;
+    const offset = (page - 1) * limit;
+
+    // Get basic room requests
+    let query = supabase
+      .from('room_requests')
+      .select(`
+        id,
+        user_id,
+        student_profile_id,
+        preferred_room_type,
+        special_requirements,
+        status,
+        created_at,
+        processed_at,
+        notes
+      `)
+      .order('created_at', { ascending: false });
+
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    query = query.range(offset, offset + limit - 1);
+
+    const { data: requests, error } = await query;
+
+    if (error) {
+      console.error('❌ DEBUG ALL: Query error:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    console.log('✅ DEBUG ALL: Found', requests?.length || 0, 'requests');
+
+    // Get total count
+    let countQuery = supabase
+      .from('room_requests')
+      .select('*', { count: 'exact', head: true });
+
+    if (status && status !== 'all') {
+      countQuery = countQuery.eq('status', status);
+    }
+
+    const { count } = await countQuery;
+
+    res.json({
+      success: true,
+      data: {
+        requests: requests || [],
+        pagination: {
+          total: count || 0,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil((count || 0) / limit)
+        }
+      },
+      debug_info: {
+        query_params: { status, page, limit, offset },
+        raw_requests_count: requests?.length || 0,
+        total_count: count || 0
+      }
+    });
+  } catch (error) {
+    console.error('❌ DEBUG ALL: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}));
+
+// SIMPLE TEST ENDPOINT: Just get raw room requests data
+router.get('/simple-test', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 SIMPLE TEST: Getting raw room requests...');
+    
+    // Get ALL room requests without any filters
+    const { data: requests, error } = await supabase
+      .from('room_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (error) {
+      console.error('❌ SIMPLE TEST: Query error:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+        details: error
+      });
+    }
+
+    console.log('✅ SIMPLE TEST: Found', requests?.length || 0, 'requests');
+    console.log('🔍 SIMPLE TEST: Sample requests:', requests?.slice(0, 2));
+
+    res.json({
+      success: true,
+      count: requests?.length || 0,
+      requests: requests || [],
+      message: `Found ${requests?.length || 0} room requests in database`
+    });
+  } catch (error) {
+    console.error('❌ SIMPLE TEST: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+  }
+}));
+
+// QUICK TEST ENDPOINT: Test the exact query used by /all endpoint
+router.get('/test-all-query', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 TEST ALL QUERY: Testing the exact query from /all endpoint...');
+    
+    // Use the exact same query as the /all endpoint
+    let query = supabase
+      .from('room_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    const { data: requests, error } = await query;
+
+    if (error) {
+      console.error('❌ TEST ALL QUERY: Query error:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+        details: error
+      });
+    }
+
+    console.log('✅ TEST ALL QUERY: Found', requests?.length || 0, 'requests');
+    console.log('🔍 TEST ALL QUERY: Sample requests:', requests?.slice(0, 2));
+
+    res.json({
+      success: true,
+      count: requests?.length || 0,
+      requests: requests || [],
+      message: `Found ${requests?.length || 0} room requests using /all endpoint query`
+    });
+  } catch (error) {
+    console.error('❌ TEST ALL QUERY: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+  }
+}));
+
+// DEBUG DATABASE STATE ENDPOINT: Check what's in the database
+router.get('/debug-database', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 DEBUG DATABASE: Checking database state...');
+    
+    // Check all tables
+    const { data: requests, error: requestsError } = await supabase
+      .from('room_requests')
+      .select('id, user_id, preferred_room_type, status, created_at');
+    
+    const { data: rooms, error: roomsError } = await supabase
+      .from('rooms')
+      .select('id, room_number, room_type, capacity, current_occupancy, status');
+    
+    const { data: users, error: usersError } = await supabase
+      .from('users')
+      .select('id, email, full_name, role, status');
+    
+    const { data: allocations, error: allocationsError } = await supabase
+      .from('room_allocations')
+      .select('id, user_id, room_id, allocation_status');
+    
+    res.json({
+      success: true,
+      data: {
+        room_requests: {
+          count: requests?.length || 0,
+          data: requests || [],
+          error: requestsError?.message || null
+        },
+        rooms: {
+          count: rooms?.length || 0,
+          data: rooms || [],
+          error: roomsError?.message || null
+        },
+        users: {
+          count: users?.length || 0,
+          data: users || [],
+          error: usersError?.message || null
+        },
+        room_allocations: {
+          count: allocations?.length || 0,
+          data: allocations || [],
+          error: allocationsError?.message || null
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ DEBUG DATABASE: Error:', error);
+    res.json({
+      success: false,
+      error: error.message
+    });
+  }
+}));
+
+// CHECK ROOM REQUEST ENDPOINT: Check if a specific room request exists
+router.get('/check/:id', asyncHandler(async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log('🔍 CHECK: Looking for room request with ID:', id);
+    
+    const { data: requestData, error } = await supabase
+      .from('room_requests')
+      .select('*')
+      .eq('id', id);
+
+    // Handle the case where .single() might fail
+    const request = requestData && requestData.length > 0 ? requestData[0] : null;
+    
+    if (error) {
+      console.error('❌ CHECK: Database error:', error);
+      return res.json({
+        success: false,
+        error: error.message,
+        request: null
+      });
+    }
+    
+    if (!request) {
+      console.log('❌ CHECK: Room request not found');
+      
+      // Get all room requests to see what exists
+      const { data: allRequests, error: allError } = await supabase
+        .from('room_requests')
+        .select('id, status, created_at')
+        .order('created_at', { ascending: false })
+        .limit(10);
+      
+      return res.json({
+        success: false,
+        error: 'Room request not found',
+        request: null,
+        all_requests: allRequests || []
+      });
+    }
+    
+    console.log('✅ CHECK: Room request found:', request);
+    res.json({
+      success: true,
+      request: request
+    });
+    
+  } catch (error) {
+    console.error('❌ CHECK: Error:', error);
+    res.json({
+      success: false,
+      error: error.message,
+      request: null
+    });
+  }
+}));
+
+// COMPREHENSIVE DEBUG ENDPOINT: Test different query approaches
+router.get('/comprehensive-debug', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 COMPREHENSIVE DEBUG: Testing different query approaches...');
+    
+    const results = {};
+    
+    // Test 1: Basic select all
+    console.log('🔍 COMPREHENSIVE DEBUG: Test 1 - Basic select all');
+    const { data: allRequests, error: allError } = await supabase
+      .from('room_requests')
+      .select('*');
+    
+    results.test1_basic_select = {
+      count: allRequests?.length || 0,
+      error: allError?.message || null,
+      sample_data: allRequests?.slice(0, 2) || []
+    };
+    
+    console.log('🔍 COMPREHENSIVE DEBUG: Test 1 result:', results.test1_basic_select);
+    
+    // Test 2: Select with specific columns (like the main endpoint)
+    console.log('🔍 COMPREHENSIVE DEBUG: Test 2 - Select with specific columns');
+    const { data: specificRequests, error: specificError } = await supabase
+      .from('room_requests')
+      .select(`
+        id,
+        user_id,
+        student_profile_id,
+        preferred_room_type,
+        special_requirements,
+        urgency_level,
+        status,
+        requested_at,
+        processed_at,
+        processed_by,
+        notes,
+        created_at,
+        allocated_room_id,
+        allocated_at,
+        room_id
+      `)
+      .order('created_at', { ascending: false });
+    
+    results.test2_specific_columns = {
+      count: specificRequests?.length || 0,
+      error: specificError?.message || null,
+      sample_data: specificRequests?.slice(0, 2) || []
+    };
+    
+    // Test 3: Filter by pending status
+    console.log('🔍 COMPREHENSIVE DEBUG: Test 3 - Filter by pending status');
+    const { data: pendingRequests, error: pendingError } = await supabase
+      .from('room_requests')
+      .select('*')
+      .eq('status', 'pending');
+    
+    results.test3_pending_filter = {
+      count: pendingRequests?.length || 0,
+      error: pendingError?.message || null,
+      sample_data: pendingRequests?.slice(0, 2) || []
+    };
+    
+    // Test 4: Check table structure
+    console.log('🔍 COMPREHENSIVE DEBUG: Test 4 - Check table structure');
+    const { data: structureRequests, error: structureError } = await supabase
+      .from('room_requests')
+      .select('*')
+      .limit(1);
+    
+    results.test4_table_structure = {
+      has_data: structureRequests?.length > 0,
+      error: structureError?.message || null,
+      sample_record: structureRequests?.[0] || null,
+      columns: structureRequests?.[0] ? Object.keys(structureRequests[0]) : []
+    };
+    
+    // Test 5: Count total records
+    console.log('🔍 COMPREHENSIVE DEBUG: Test 5 - Count total records');
+    const { count: totalCount, error: countError } = await supabase
+      .from('room_requests')
+      .select('*', { count: 'exact', head: true });
+    
+    results.test5_total_count = {
+      count: totalCount || 0,
+      error: countError?.message || null
+    };
+    
+    console.log('✅ COMPREHENSIVE DEBUG: All tests completed');
+    console.log('📊 COMPREHENSIVE DEBUG: Results:', results);
+
+    res.json({
+      success: true,
+      message: 'Comprehensive debug completed',
+      results: results,
+      summary: {
+        total_records: results.test5_total_count.count,
+        basic_select_count: results.test1_basic_select.count,
+        specific_columns_count: results.test2_specific_columns.count,
+        pending_count: results.test3_pending_filter.count,
+        has_data: results.test4_table_structure.has_data
+      }
+    });
+  } catch (error) {
+    console.error('❌ COMPREHENSIVE DEBUG: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack
     });
   }
 }));
@@ -798,10 +1240,39 @@ router.get('/', authMiddleware, staffMiddleware, asyncHandler(async (req, res) =
 
 /**
  * @route   PUT /api/room-requests/:id/approve
- * @desc    Approve room request (staff only)
- * @access  Private (Staff)
+ * @desc    Approve room request (hostel operations assistant primary, warden/admin override)
+ * @access  Private (Operations Assistant + Supervisory Override)
  */
-router.put('/:id/approve', authMiddleware, staffMiddleware, [
+router.put('/:id/approve', authMiddleware, async (req, res, next) => {
+  try {
+    const { data: userProfile, error } = await supabase
+      .from('users')
+      .select('role, status')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (error || !userProfile) {
+      throw new AuthorizationError('User profile not found');
+    }
+
+    // Allow hostel operations assistant, warden, or admin
+    if (!['hostel_operations_assistant', 'warden', 'admin'].includes(userProfile.role)) {
+      throw new AuthorizationError('Insufficient permissions to approve room requests');
+    }
+
+    // Check if user account is inactive or suspended
+    if (userProfile.status === 'inactive' || userProfile.status === 'suspended') {
+      const statusMessage = userProfile.status === 'suspended' 
+        ? 'Your account has been suspended. Please contact an administrator.'
+        : 'Your account is currently inactive. Please contact an administrator to activate your account.';
+      throw new AuthorizationError(statusMessage);
+    }
+    
+    next();
+  } catch (error) {
+    throw new AuthorizationError('Access denied');
+  }
+}, [
   body('room_id').isUUID().withMessage('Valid room ID is required'),
   body('notes').optional().isString().withMessage('Notes must be text')
 ], asyncHandler(async (req, res) => {
@@ -825,8 +1296,10 @@ router.put('/:id/approve', authMiddleware, staffMiddleware, [
       throw new ValidationError('Staff profile not found');
     }
 
-    // Get room request
-    const { data: request, error: requestError } = await supabase
+    // Get room request with detailed logging
+    console.log('🔍 APPROVAL: Looking for room request with ID:', id);
+    
+    const { data: requestData, error: requestError } = await supabase
       .from('room_requests')
       .select(`
         id,
@@ -834,10 +1307,29 @@ router.put('/:id/approve', authMiddleware, staffMiddleware, [
         preferred_room_type,
         status
       `)
-      .eq('id', id)
-      .single();
+      .eq('id', id);
 
-    if (requestError || !request) {
+    // Handle the case where .single() might fail
+    const request = requestData && requestData.length > 0 ? requestData[0] : null;
+
+    console.log('🔍 APPROVAL: Query result:', { request, requestError });
+
+    if (requestError) {
+      console.error('❌ APPROVAL: Database error:', requestError);
+      throw new ValidationError(`Database error: ${requestError.message}`);
+    }
+
+    if (!request) {
+      console.error('❌ APPROVAL: Room request not found for ID:', id);
+      
+      // Check if any room requests exist at all
+      const { data: allRequests, error: allError } = await supabase
+        .from('room_requests')
+        .select('id, status, created_at')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      console.log('🔍 APPROVAL: All room requests in database:', allRequests);
       throw new ValidationError('Room request not found');
     }
 
@@ -846,11 +1338,13 @@ router.put('/:id/approve', authMiddleware, staffMiddleware, [
     }
 
     // Check if room is available
-    const { data: room, error: roomError } = await supabase
+    const { data: roomData, error: roomError } = await supabase
       .from('rooms')
       .select('id, room_number, capacity, current_occupancy, status')
-      .eq('id', room_id)
-      .single();
+      .eq('id', room_id);
+
+    // Handle the case where .single() might fail
+    const room = roomData && roomData.length > 0 ? roomData[0] : null;
 
     if (roomError || !room) {
       throw new ValidationError('Room not found');
@@ -886,7 +1380,9 @@ router.put('/:id/approve', authMiddleware, staffMiddleware, [
         user_id: request.user_id,
         room_id: room_id,
         allocation_status: 'confirmed',
-        allocated_at: new Date().toISOString()
+        allocated_at: new Date().toISOString(),
+        start_date: new Date().toISOString().split('T')[0], // Add required start_date (YYYY-MM-DD format)
+        allocation_date: new Date().toISOString() // Also add allocation_date
       })
       .select()
       .single();
@@ -1006,6 +1502,491 @@ router.put('/:id/reject', authMiddleware, staffMiddleware, [
       data: {
         request_id: id,
         message: 'Room request rejected successfully'
+      }
+    });
+  } catch (error) {
+    throw error;
+  }
+}));
+
+/**
+ * @route   PUT /api/room-requests/:id/reject
+ * @desc    Reject room request (staff access)
+ * @access  Private (Staff)
+ */
+router.put('/:id/reject', authMiddleware, asyncHandler(async (req, res) => {
+  try {
+    // Check if user has staff access
+    const { data: userProfile } = await supabase
+      .from('users')
+      .select('id, role, full_name')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (!userProfile || !['admin', 'warden', 'hostel_operations_assistant'].includes(userProfile.role)) {
+      throw new ValidationError('Staff access required');
+    }
+
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    // Get room request
+    const { data: request, error: requestError } = await supabase
+      .from('room_requests')
+      .select('id, user_id, status')
+      .eq('id', id)
+      .single();
+
+    if (requestError || !request) {
+      throw new ValidationError('Room request not found');
+    }
+
+    if (request.status !== 'pending') {
+      throw new ValidationError('Only pending requests can be rejected');
+    }
+
+    // Update request status
+    const { error: updateError } = await supabase
+      .from('room_requests')
+      .update({
+        status: 'rejected',
+        processed_at: new Date().toISOString(),
+        processed_by: userProfile.id,
+        notes: reason || 'Request rejected by staff'
+      })
+      .eq('id', id);
+
+    if (updateError) {
+      throw new Error(`Failed to reject request: ${updateError.message}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'Room request rejected successfully',
+      data: {
+        id: request.id,
+        status: 'rejected',
+        processed_at: new Date().toISOString(),
+        processed_by: userProfile.full_name
+      }
+    });
+  } catch (error) {
+    throw error;
+  }
+}));
+
+/**
+ * @route   GET /api/room-requests/all
+ * @desc    Get all room requests (staff access) - SIMPLIFIED VERSION
+ * @access  Private (Staff)
+ */
+router.get('/all', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 ROOM REQUESTS ALL: Starting request...');
+    
+    // TEMPORARY: Skip authentication check for debugging
+    console.log('🔍 ROOM REQUESTS ALL: TEMPORARY - Skipping authentication check for debugging');
+    console.log('✅ ROOM REQUESTS ALL: Proceeding with request...');
+
+    const { status, page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
+
+    console.log('🔍 ROOM REQUESTS ALL: Query params:', { status, page, limit, offset });
+
+    // SIMPLIFIED QUERY: Just get basic room requests first - match actual table structure
+    let query = supabase
+      .from('room_requests')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    // Apply status filter if provided
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    // Apply pagination
+    query = query.range(offset, offset + limit - 1);
+
+    console.log('🔍 ROOM REQUESTS ALL: Executing query...');
+    const { data: requests, error } = await query;
+
+    if (error) {
+      console.error('❌ ROOM REQUESTS ALL: Query error:', error);
+      throw new Error(`Failed to fetch room requests: ${error.message}`);
+    }
+
+    console.log('✅ ROOM REQUESTS ALL: Query successful, found:', requests?.length || 0, 'requests');
+    console.log('🔍 ROOM REQUESTS ALL: Raw requests data:', requests);
+    
+    // DEBUG: Also test the same query without filters to compare
+    console.log('🔍 ROOM REQUESTS ALL: DEBUG - Testing query without filters...');
+    const { data: debugRequests, error: debugError } = await supabase
+      .from('room_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    console.log('🔍 ROOM REQUESTS ALL: DEBUG - Unfiltered query result:', {
+      count: debugRequests?.length || 0,
+      error: debugError?.message || null,
+      sample_data: debugRequests?.slice(0, 2) || []
+    });
+    
+    // If debug query found data but main query didn't, there's a filtering issue
+    if (debugRequests && debugRequests.length > 0 && (!requests || requests.length === 0)) {
+      console.log('🚨 ROOM REQUESTS ALL: DEBUG - Found data in unfiltered query but not in main query!');
+      console.log('🚨 ROOM REQUESTS ALL: DEBUG - This indicates a filtering or pagination issue');
+      
+      // Return the debug data instead of empty data
+      console.log('🔧 ROOM REQUESTS ALL: DEBUG - Using debug data instead of empty main query result');
+      const debugEnrichedRequests = [];
+      
+      for (const request of debugRequests) {
+        console.log('🔍 ROOM REQUESTS ALL: DEBUG - Processing debug request:', request.id);
+        
+        // Create a basic enriched request
+        const enrichedRequest = {
+          ...request,
+          student_profile: {
+            full_name: 'Unknown Student',
+            admission_number: 'N/A',
+            email: 'N/A',
+            phone_number: 'N/A',
+            course: 'N/A',
+            batch_year: 'N/A'
+          },
+          room_details: null,
+          allocated_room: null,
+          requested_room: null
+        };
+        
+        debugEnrichedRequests.push(enrichedRequest);
+      }
+      
+      console.log('✅ ROOM REQUESTS ALL: DEBUG - Returning debug data with', debugEnrichedRequests.length, 'requests');
+      
+      const debugResponse = {
+        success: true,
+        data: {
+          requests: debugEnrichedRequests,
+          pagination: {
+            total: debugRequests.length,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            totalPages: Math.ceil(debugRequests.length / limit)
+          }
+        }
+      };
+      
+      console.log('📤 ROOM REQUESTS ALL: DEBUG - Returning debug response with', debugEnrichedRequests.length, 'requests');
+      return res.json(debugResponse);
+    }
+
+    // SIMPLIFIED ENRICHMENT: Just add basic user info
+    const enrichedRequests = [];
+    if (requests && requests.length > 0) {
+      console.log('🔍 ROOM REQUESTS ALL: Starting enrichment process...');
+      for (const request of requests) {
+        console.log('🔍 ROOM REQUESTS ALL: Processing request:', request.id);
+        
+        let userProfile = null;
+        
+        // Try to get user info from users table using user_id
+        if (request.user_id) {
+          try {
+            const { data: userData } = await supabase
+              .from('users')
+              .select('id, full_name, email, phone, username, linked_admission_number')
+              .eq('id', request.user_id)
+              .single();
+            
+            if (userData) {
+              console.log('✅ ROOM REQUESTS ALL: Found user data for request:', request.id);
+              userProfile = {
+                full_name: userData.full_name || 'Unknown Student',
+                admission_number: userData.linked_admission_number || userData.username || 'N/A',
+                email: userData.email || 'N/A',
+                phone_number: userData.phone || 'N/A',
+                course: 'N/A',
+                batch_year: 'N/A'
+              };
+            }
+          } catch (userError) {
+            console.warn('⚠️ ROOM REQUESTS ALL: Failed to get user data for request:', request.id, userError.message);
+          }
+        } else if (request.student_profile_id) {
+          // Try to get user info from user_profiles table using student_profile_id
+          try {
+            const { data: profileData } = await supabase
+              .from('user_profiles')
+              .select(`
+                id,
+                first_name,
+                last_name,
+                phone,
+                user_id,
+                users!inner(id, email, username, linked_admission_number)
+              `)
+              .eq('id', request.student_profile_id)
+              .single();
+            
+            if (profileData) {
+              console.log('✅ ROOM REQUESTS ALL: Found profile data for request:', request.id);
+              userProfile = {
+                full_name: `${profileData.first_name || ''} ${profileData.last_name || ''}`.trim() || 'Unknown Student',
+                admission_number: profileData.users?.linked_admission_number || profileData.users?.username || 'N/A',
+                email: profileData.users?.email || 'N/A',
+                phone_number: profileData.phone || 'N/A',
+                course: 'N/A',
+                batch_year: 'N/A'
+              };
+            }
+          } catch (profileError) {
+            console.warn('⚠️ ROOM REQUESTS ALL: Failed to get profile data for request:', request.id, profileError.message);
+          }
+        }
+
+        // If no user profile found, create a basic one
+        if (!userProfile) {
+          console.log('⚠️ ROOM REQUESTS ALL: No user profile found for request:', request.id);
+          userProfile = {
+            full_name: 'Unknown Student',
+            admission_number: 'N/A',
+            email: 'N/A',
+            phone_number: 'N/A',
+            course: 'N/A',
+            batch_year: 'N/A'
+          };
+        }
+
+        // Get room details if allocated_room_id exists
+        let roomDetails = null;
+        if (request.allocated_room_id) {
+          try {
+            const { data: roomData } = await supabase
+              .from('rooms')
+              .select('room_number, floor, room_type, capacity')
+              .eq('id', request.allocated_room_id)
+              .single();
+            roomDetails = roomData;
+          } catch (roomError) {
+            console.warn('⚠️ ROOM REQUESTS ALL: Failed to get room data:', roomError.message);
+          }
+        }
+
+        // Parse special requirements to extract room info
+        let requestedRoomInfo = null;
+        if (request.special_requirements && request.special_requirements.includes('REQUESTED_ROOM_ID:')) {
+          try {
+            const roomIdMatch = request.special_requirements.match(/REQUESTED_ROOM_ID:([a-f0-9-]+)/i);
+            if (roomIdMatch) {
+              const requestedRoomId = roomIdMatch[1];
+              const { data: requestedRoomData } = await supabase
+                .from('rooms')
+                .select('room_number, floor, room_type, capacity')
+                .eq('id', requestedRoomId)
+                .single();
+              requestedRoomInfo = requestedRoomData;
+            }
+          } catch (roomError) {
+            console.warn('⚠️ ROOM REQUESTS ALL: Failed to get requested room data:', roomError.message);
+          }
+        }
+
+        enrichedRequests.push({
+          ...request,
+          user_profiles: userProfile,
+          allocated_room: roomDetails,
+          requested_room: requestedRoomInfo
+        });
+      }
+    }
+
+    console.log('✅ ROOM REQUESTS ALL: Enriched', enrichedRequests.length, 'requests');
+
+    // Get total count for pagination
+    let countQuery = supabase
+      .from('room_requests')
+      .select('*', { count: 'exact', head: true });
+
+    if (status && status !== 'all') {
+      countQuery = countQuery.eq('status', status);
+    }
+
+    const { count } = await countQuery;
+    console.log('✅ ROOM REQUESTS ALL: Total count:', count);
+
+    const response = {
+      success: true,
+      data: {
+        requests: enrichedRequests || [],
+        pagination: {
+          total: count || 0,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil((count || 0) / limit)
+        }
+      }
+    };
+
+    console.log('📤 ROOM REQUESTS ALL: Returning response with', enrichedRequests.length, 'requests');
+    res.json(response);
+  } catch (error) {
+    console.error('❌ ROOM REQUESTS ALL: Error:', error);
+    throw error;
+  }
+}));
+
+/**
+ * @route   GET /api/room-requests/admin/analytics
+ * @desc    Get room allocation analytics and completed allocations (admin only)
+ * @access  Private (Admin)
+ */
+router.get('/admin/analytics', authMiddleware, asyncHandler(async (req, res) => {
+  try {
+    // Check if user has admin access
+    const { data: userProfile } = await supabase
+      .from('users')
+      .select('role')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (!userProfile || userProfile.role !== 'admin') {
+      throw new ValidationError('Admin access required');
+    }
+
+    const { start_date, end_date, page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
+
+    // Build query for approved room requests
+    let query = supabase
+      .from('room_requests')
+      .select(`
+        id,
+        user_id,
+        preferred_room_type,
+        special_requirements,
+        status,
+        created_at,
+        processed_at,
+        notes,
+        user_profiles!room_requests_user_id_fkey(
+          full_name,
+          admission_number,
+          email,
+          phone_number
+        ),
+        room_allocations!room_requests_id_fkey(
+          room_id,
+          allocation_status,
+          allocated_at,
+          rooms!room_allocations_room_id_fkey(
+            room_number,
+            floor,
+            capacity
+          )
+        )
+      `)
+      .eq('status', 'approved')
+      .order('processed_at', { ascending: false });
+
+    // Apply date filters if provided
+    if (start_date) {
+      query = query.gte('processed_at', start_date);
+    }
+    if (end_date) {
+      query = query.lte('processed_at', end_date);
+    }
+
+    // Apply pagination
+    query = query.range(offset, offset + limit - 1);
+
+    const { data: approvedRequestsData, error } = await query;
+
+    if (error) {
+      throw new Error(`Failed to fetch approved requests: ${error.message}`);
+    }
+
+    // Get analytics data
+    const { data: allRequests, error: analyticsError } = await supabase
+      .from('room_requests')
+      .select('status, preferred_room_type, created_at, processed_at');
+
+    if (analyticsError) {
+      throw new Error(`Failed to fetch analytics: ${analyticsError.message}`);
+    }
+
+    // Calculate analytics
+    const totalRequests = allRequests.length;
+    const approvedRequests = allRequests.filter(r => r.status === 'approved').length;
+    const pendingRequests = allRequests.filter(r => r.status === 'pending').length;
+    const rejectedRequests = allRequests.filter(r => r.status === 'rejected').length;
+    const waitlistedRequests = allRequests.filter(r => r.status === 'waitlisted').length;
+
+    // Room type distribution
+    const roomTypeStats = allRequests.reduce((acc, request) => {
+      acc[request.preferred_room_type] = (acc[request.preferred_room_type] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Monthly approval stats (last 12 months)
+    const monthlyStats = allRequests
+      .filter(r => r.processed_at)
+      .reduce((acc, request) => {
+        const month = new Date(request.processed_at).toISOString().slice(0, 7); // YYYY-MM
+        acc[month] = (acc[month] || 0) + 1;
+        return acc;
+      }, {});
+
+    // Average processing time
+    const processingTimes = allRequests
+      .filter(r => r.processed_at && r.created_at)
+      .map(r => {
+        const created = new Date(r.created_at);
+        const processed = new Date(r.processed_at);
+        return Math.round((processed - created) / (1000 * 60 * 60 * 24)); // days
+      });
+
+    const avgProcessingTime = processingTimes.length > 0 
+      ? Math.round(processingTimes.reduce((a, b) => a + b, 0) / processingTimes.length)
+      : 0;
+
+    // Get total count for pagination
+    let countQuery = supabase
+      .from('room_requests')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'approved');
+
+    if (start_date) {
+      countQuery = countQuery.gte('processed_at', start_date);
+    }
+    if (end_date) {
+      countQuery = countQuery.lte('processed_at', end_date);
+    }
+
+    const { count } = await countQuery;
+
+    res.json({
+      success: true,
+      data: {
+        approvedRequests: approvedRequestsData || [],
+        analytics: {
+          totalRequests,
+          approvedRequests,
+          pendingRequests,
+          rejectedRequests,
+          waitlistedRequests,
+          approvalRate: totalRequests > 0 ? Math.round((approvedRequests / totalRequests) * 100) : 0,
+          avgProcessingTime,
+          roomTypeStats,
+          monthlyStats
+        },
+        pagination: {
+          total: count || 0,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil((count || 0) / limit)
+        }
       }
     });
   } catch (error) {

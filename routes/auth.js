@@ -293,6 +293,11 @@ router.post('/login', [
 
     // Check if user is suspended or inactive before proceeding
     if (userProfile && (userProfile.status === 'suspended' || userProfile.status === 'inactive')) {
+      console.log('🔍 Auth: User status check failed:', {
+        email: userProfile.email,
+        role: userProfile.role,
+        status: userProfile.status
+      });
       const statusMessage = userProfile.status === 'suspended' 
         ? 'Your account has been suspended. Please contact an administrator.'
         : 'Your account is currently inactive. Please contact an administrator to activate your account.';
@@ -304,6 +309,13 @@ router.post('/login', [
     if (!userProfile) {
       throw new AuthenticationError('Your account is not yet activated by hostel staff. Please contact the hostel administration.');
     }
+
+  console.log('🔍 Auth: Login successful for user:', {
+    email: userProfile.email,
+    role: userProfile.role,
+    status: userProfile.status,
+    id: userProfile.id
+  });
 
   res.json({
       success: true,
