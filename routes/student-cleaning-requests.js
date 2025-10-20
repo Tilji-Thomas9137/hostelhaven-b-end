@@ -187,7 +187,7 @@ router.get('/', authMiddleware, studentMiddleware, asyncHandler(async (req, res)
       .from('room_allocations')
       .select('room_id')
       .eq('user_id', userRow.id)
-      .eq('allocation_status', 'active')
+      .in('allocation_status', ['active', 'confirmed'])
       .single();
 
     if (!roomAllocation) {
@@ -256,7 +256,7 @@ router.post('/', authMiddleware, studentMiddleware, [
       .from('room_allocations')
       .select('room_id')
       .eq('user_id', userRow.id)
-      .eq('allocation_status', 'active')
+      .in('allocation_status', ['active', 'confirmed'])
       .single();
 
     if (!roomAllocation) {
@@ -345,7 +345,7 @@ router.post('/', authMiddleware, studentMiddleware, [
 router.put('/:id/approve', authMiddleware, asyncHandler(async (req, res) => {
   try {
     const { id } = req.params;
-    const { assigned_to, notes } = req.body;
+    const { notes } = req.body;
 
     // Check if user has hostel operations assistant access
     const { data: userProfile } = await supabase
@@ -382,7 +382,6 @@ router.put('/:id/approve', authMiddleware, asyncHandler(async (req, res) => {
       .from('cleaning_requests')
       .update({ 
         status: 'approved',
-        assigned_to: assigned_to || null,
         notes: notes || 'Request approved by staff',
         updated_at: new Date().toISOString()
       })

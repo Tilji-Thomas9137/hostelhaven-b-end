@@ -1994,4 +1994,61 @@ router.get('/admin/analytics', authMiddleware, asyncHandler(async (req, res) => 
   }
 }));
 
+/**
+ * @route   GET /api/room-requests/debug-check
+ * @desc    Debug endpoint to check database state
+ * @access  Public (for debugging)
+ */
+router.get('/debug-check', asyncHandler(async (req, res) => {
+  try {
+    console.log('🔍 DEBUG CHECK: Checking database state...');
+    
+    // Check room_requests table
+    const { data: roomRequests, error: roomRequestsError } = await supabase
+      .from('room_requests')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    // Check users table
+    const { data: users, error: usersError } = await supabase
+      .from('users')
+      .select('id, email, role, full_name')
+      .limit(5);
+    
+    // Check rooms table
+    const { data: rooms, error: roomsError } = await supabase
+      .from('rooms')
+      .select('id, room_number, status')
+      .limit(5);
+
+    res.json({
+      success: true,
+      debug_info: {
+        room_requests: {
+          count: roomRequests?.length || 0,
+          error: roomRequestsError?.message || null,
+          sample_data: roomRequests?.slice(0, 3) || []
+        },
+        users: {
+          count: users?.length || 0,
+          error: usersError?.message || null,
+          sample_data: users?.slice(0, 3) || []
+        },
+        rooms: {
+          count: rooms?.length || 0,
+          error: roomsError?.message || null,
+          sample_data: rooms?.slice(0, 3) || []
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ DEBUG CHECK: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}));
+
 module.exports = router;
