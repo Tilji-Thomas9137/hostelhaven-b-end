@@ -466,7 +466,7 @@ router.get('/users', authMiddleware, adminMiddleware, [
     .from('users')
     .select(`
       *,
-      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status)
+      user_profiles:user_profiles(user_id, admission_number, course, batch_year, avatar_url, status, profile_status, phone_number)
     `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
@@ -534,6 +534,7 @@ router.get('/users', authMiddleware, adminMiddleware, [
  */
 router.get('/users/:id', authMiddleware, adminMiddleware, asyncHandler(async (req, res) => {
   const { id } = req.params;
+  console.log('🔍 ADMIN API: Fetching user details for ID:', id);
 
   // First get the user
   const { data: user, error: userError } = await supabase
@@ -543,8 +544,11 @@ router.get('/users/:id', authMiddleware, adminMiddleware, asyncHandler(async (re
     .single();
 
   if (userError || !user) {
+    console.log('❌ ADMIN API: User not found:', userError?.message || 'No user data');
     throw new ValidationError('User not found');
   }
+
+  console.log('✅ ADMIN API: User found:', { id: user.id, email: user.email, full_name: user.full_name, role: user.role });
 
   // Get user profile if exists
   const { data: userProfile } = await supabase
@@ -552,6 +556,17 @@ router.get('/users/:id', authMiddleware, adminMiddleware, asyncHandler(async (re
     .select('*')
     .eq('user_id', id)
     .single();
+
+  console.log('🔍 ADMIN API: User profile:', userProfile ? 'Found' : 'Not found', userProfile);
+
+  // Get parent information if exists
+  const { data: parentInfo } = await supabase
+    .from('parents')
+    .select('*')
+    .eq('student_profile_id', userProfile?.id)
+    .single();
+
+  console.log('🔍 ADMIN API: Parent info:', parentInfo ? 'Found' : 'Not found', parentInfo);
 
   // Get room info if user has a room
   let roomInfo = null;
@@ -564,12 +579,35 @@ router.get('/users/:id', authMiddleware, adminMiddleware, asyncHandler(async (re
     roomInfo = room;
   }
 
+  // Get room allocation info
+  const { data: roomAllocation } = await supabase
+    .from('room_allocations')
+    .select(`
+      *,
+      rooms!room_allocations_room_id_fkey(room_number, floor, room_type, capacity, current_occupancy, status, price)
+    `)
+    .eq('user_id', id)
+    .in('allocation_status', ['active', 'confirmed'])
+    .single();
+
   // Combine all data
   const userWithDetails = {
     ...user,
     user_profiles: userProfile,
-    rooms: roomInfo
+    parents: parentInfo,
+    rooms: roomInfo,
+    room_allocations: roomAllocation
   };
+
+  console.log('🔍 ADMIN API: Final user data being sent:', {
+    user_id: userWithDetails.id,
+    email: userWithDetails.email,
+    full_name: userWithDetails.full_name,
+    has_user_profiles: !!userWithDetails.user_profiles,
+    has_parents: !!userWithDetails.parents,
+    user_profiles_data: userWithDetails.user_profiles,
+    parents_data: userWithDetails.parents
+  });
 
   res.json({
     success: true,

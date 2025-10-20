@@ -800,4 +800,75 @@ router.get('/admin/analytics', authMiddleware, asyncHandler(async (req, res) => 
   }
 }));
 
+/**
+ * @route   GET /api/student-cleaning-requests/check-room-allocation
+ * @desc    Check if student has room allocation before allowing cleaning requests
+ * @access  Private (Student)
+ */
+router.get('/check-room-allocation', authMiddleware, asyncHandler(async (req, res) => {
+  try {
+    const { data: { session } } = await supabase.auth.getUser(req.user.access_token);
+    if (!session?.user) {
+      throw new ValidationError('Authentication required');
+    }
+
+    // Get user profile
+    const { data: userProfile } = await supabase
+      .from('users')
+      .select('id')
+      .eq('auth_uid', session.user.id)
+      .single();
+
+    if (!userProfile) {
+      throw new ValidationError('User profile not found');
+    }
+
+    // Check if student has room allocation
+    const { data: roomAllocation } = await supabase
+      .from('room_allocations')
+      .select(`
+        id,
+        room_id,
+        allocation_status,
+        rooms!room_allocations_room_id_fkey(
+          room_number,
+          floor,
+          room_type
+        )
+      `)
+      .eq('user_id', userProfile.id)
+      .in('allocation_status', ['active', 'confirmed'])
+      .single();
+
+    if (!roomAllocation) {
+      return res.status(400).json({
+        success: false,
+        message: 'No room allocation found. Please contact hostel administration to get a room allocated before requesting cleaning services.',
+        hasAllocation: false
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Room allocation found',
+      hasAllocation: true,
+      data: {
+        roomAllocation: {
+          id: roomAllocation.id,
+          room_id: roomAllocation.room_id,
+          allocation_status: roomAllocation.allocation_status,
+          room: roomAllocation.rooms
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ CHECK ROOM ALLOCATION: Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}));
+
 module.exports = router;

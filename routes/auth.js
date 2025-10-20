@@ -71,6 +71,130 @@ router.post('/activate', [
     throw new ValidationError('OTP has expired');
   }
 
+  // If this user already has an auth account, skip creation and just finalize activation
+  if (user.auth_uid) {
+    const { data: updatedUserExisting, error: updateExistingErr } = await supabase
+      .from('users')
+      .update({
+        status: 'active',
+        activation_token: null,
+        activation_expires_at: null,
+        otp_code: null,
+        otp_expires_at: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+      .select()
+      .single();
+
+    if (updateExistingErr) {
+      throw new ValidationError('Failed to finalize activation');
+    }
+
+    // Ensure/activate a corresponding user_profiles row for this user
+    try {
+      const { data: existingProfile2 } = await supabase
+        .from('user_profiles')
+        .select('id, profile_status')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (existingProfile2) {
+        if (existingProfile2.profile_status !== 'active') {
+          await supabase
+            .from('user_profiles')
+            .update({ profile_status: 'active' })
+            .eq('id', existingProfile2.id);
+        }
+      } else {
+        const admissionNumber2 = user.linked_admission_number || user.username || null;
+        await supabase
+          .from('user_profiles')
+          .insert({
+            user_id: user.id,
+            admission_number: admissionNumber2,
+            profile_status: 'active',
+            status: 'incomplete'
+          });
+      }
+    } catch (e) {
+      console.warn('Activation finalize (pre-existing auth) warning:', e.message);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Account activated successfully. You can now log in.',
+      data: { role: updatedUserExisting.role }
+    });
+  }
+
+  // Check if user already exists in Supabase Auth
+  try {
+    const { data: existingAuthUser } = await supabaseAdmin.auth.admin.getUserByEmail(user.email);
+    if (existingAuthUser.user) {
+      console.log('🔍 ACTIVATION: User already exists in Supabase Auth, linking existing account');
+      // Link the existing auth user to our database user
+      const { data: updatedUser, error: updateError } = await supabase
+        .from('users')
+        .update({
+          auth_uid: existingAuthUser.user.id,
+          status: 'active',
+          activation_token: null,
+          activation_expires_at: null,
+          otp_code: null,
+          otp_expires_at: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', user.id)
+        .select()
+        .single();
+
+      if (updateError) {
+        console.error('❌ ACTIVATION: Failed to link existing auth user:', updateError);
+        throw new ValidationError('Failed to link existing authentication account');
+      }
+
+      // Continue with profile activation
+      try {
+        const { data: existingProfile } = await supabase
+          .from('user_profiles')
+          .select('id, profile_status')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (existingProfile) {
+          if (existingProfile.profile_status !== 'active') {
+            await supabase
+              .from('user_profiles')
+              .update({ profile_status: 'active' })
+              .eq('id', existingProfile.id);
+          }
+        } else {
+          const admissionNumber = user.linked_admission_number || user.username || null;
+          await supabase
+            .from('user_profiles')
+            .insert({
+              user_id: user.id,
+              admission_number: admissionNumber,
+              profile_status: 'active',
+              status: 'incomplete'
+            });
+        }
+      } catch (e) {
+        console.warn('Activation: unable to ensure/activate user profile:', e.message);
+      }
+
+      res.json({
+        success: true,
+        message: 'Account activated successfully. You can now log in.',
+        data: { role: updatedUser.role }
+      });
+      return;
+    }
+  } catch (authCheckError) {
+    console.log('🔍 ACTIVATION: No existing auth user found, proceeding with creation');
+  }
+
   const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email: user.email,
     password,
@@ -78,6 +202,79 @@ router.post('/activate', [
   });
 
   if (authError) {
+    // If the auth user already exists, link it and finalize activation
+    if (authError.status === 422 || authError.code === 'email_exists') {
+      try {
+        let { data: byEmail } = await supabaseAdmin.auth.admin.getUserByEmail(user.email);
+        let existingAuth = byEmail?.user || byEmail; // support both shapes
+        // Fallback: scan users if direct lookup missed (case differences)
+        if (!existingAuth?.id) {
+          const { data: list } = await supabaseAdmin.auth.admin.listUsers();
+          const found = list?.users?.find(u => (u.email || '').toLowerCase() === (user.email || '').toLowerCase());
+          if (found) existingAuth = found;
+        }
+        if (existingAuth?.id) {
+          const { data: updatedUserExisting, error: updateExistingErr } = await supabase
+            .from('users')
+            .update({
+              auth_uid: existingAuth.id,
+              status: 'active',
+              activation_token: null,
+              activation_expires_at: null,
+              otp_code: null,
+              otp_expires_at: null,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', user.id)
+            .select()
+            .single();
+
+          if (updateExistingErr) {
+            throw new ValidationError('Failed to finalize activation');
+          }
+
+          // Ensure/activate profile
+          try {
+            const { data: existingProfile3 } = await supabase
+              .from('user_profiles')
+              .select('id, profile_status')
+              .eq('user_id', user.id)
+              .maybeSingle();
+            if (existingProfile3) {
+              if (existingProfile3.profile_status !== 'active') {
+                await supabase
+                  .from('user_profiles')
+                  .update({ profile_status: 'active' })
+                  .eq('id', existingProfile3.id);
+              }
+            } else {
+              const admissionNumber3 = user.linked_admission_number || user.username || null;
+              await supabase
+                .from('user_profiles')
+                .insert({ user_id: user.id, admission_number: admissionNumber3, profile_status: 'active', status: 'incomplete' });
+            }
+          } catch (e) {
+            console.warn('Activation finalize (email exists) warning:', e.message);
+          }
+
+          return res.json({
+            success: true,
+            message: 'Account activated successfully. You can now log in.',
+            data: { role: updatedUserExisting.role }
+          });
+        }
+      } catch (linkErr) {
+        console.error('❌ ACTIVATION: Failed to link existing auth user after email_exists:', linkErr);
+      }
+    }
+
+    console.error('❌ ACTIVATION: Failed to create auth user:', authError);
+    console.error('❌ ACTIVATION: User email:', user.email);
+    console.error('❌ ACTIVATION: Auth error details:', {
+      message: authError.message,
+      status: authError.status,
+      statusText: authError.statusText
+    });
     throw new ValidationError('Failed to create authentication account');
   }
 
@@ -85,7 +282,7 @@ router.post('/activate', [
     .from('users')
     .update({
       auth_uid: authUser.user.id,
-      status: 'available',
+      status: 'active',
       activation_token: null,
       activation_expires_at: null,
       otp_code: null,
@@ -97,6 +294,9 @@ router.post('/activate', [
     .single();
 
   if (updateError) {
+    console.error('❌ ACTIVATION: Failed to update user:', updateError);
+    console.error('❌ ACTIVATION: User ID:', user.id);
+    console.error('❌ ACTIVATION: Auth UID:', authUser.user.id);
     throw new ValidationError('Failed to finalize activation');
   }
 
@@ -239,28 +439,87 @@ router.post('/login', [
   }
 
   const { email, password } = req.body;
-  let loginEmail = email;
+  let loginEmail = (email || '').trim();
+  const rawIdentifier = loginEmail; // remember what user typed
 
-  // Support username-based login (e.g., admission_number) by resolving to email
-  if (typeof loginEmail === 'string' && !loginEmail.includes('@')) {
-    const { data: userByUsername } = await supabase
+  // Support username-based login (admission number / parent username) by resolving to email
+  if (loginEmail && !loginEmail.includes('@')) {
+    const usernameOrAdmission = loginEmail;
+
+    let resolvedEmail = null;
+
+    // 1) Exact username match (student or parent)
+    const { data: byExactUsername } = await supabase
       .from('users')
       .select('email')
-      .eq('username', loginEmail)
-      .single();
+      .eq('username', usernameOrAdmission)
+      .maybeSingle();
+    resolvedEmail = byExactUsername?.email || resolvedEmail;
 
-    if (!userByUsername || !userByUsername.email) {
+    // 2) Prefer a STUDENT mapped by linked_admission_number
+    if (!resolvedEmail) {
+      const { data: byStudentAdmission } = await supabase
+        .from('users')
+        .select('email')
+        .eq('role', 'student')
+        .eq('linked_admission_number', usernameOrAdmission)
+        .maybeSingle();
+      resolvedEmail = byStudentAdmission?.email || resolvedEmail;
+    }
+
+    // 3) If still not found and the provided looks like an admission number, try parent username format PARENT-<admission>
+    if (!resolvedEmail && !usernameOrAdmission.startsWith('PARENT-')) {
+      const parentUsername = `PARENT-${usernameOrAdmission}`;
+      const { data: byParentUsername } = await supabase
+        .from('users')
+        .select('email')
+        .eq('username', parentUsername)
+        .maybeSingle();
+      resolvedEmail = byParentUsername?.email || resolvedEmail;
+    }
+
+    // 4) As a final fallback, map any user with linked_admission_number (parent or staff)
+    if (!resolvedEmail) {
+      const { data: byAnyAdmission } = await supabase
+        .from('users')
+        .select('email')
+        .eq('linked_admission_number', usernameOrAdmission)
+        .maybeSingle();
+      resolvedEmail = byAnyAdmission?.email || resolvedEmail;
+    }
+
+    if (!resolvedEmail) {
       throw new AuthenticationError('Invalid email/username or password');
     }
-    loginEmail = userByUsername.email;
+    loginEmail = resolvedEmail;
   }
 
   try {
-    // Authenticate user with Supabase
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+    // Authenticate user with Supabase (primary attempt)
+    let { data: authData, error: authError } = await supabase.auth.signInWithPassword({
       email: loginEmail,
       password
     });
+
+    // Fallback attempts when the user typed a username/admission number
+    if (authError && rawIdentifier && !rawIdentifier.includes('@')) {
+      const candidateEmails = new Set();
+      // Collect possible emails for this admission number / username
+      const { data: allCandidates } = await supabase
+        .from('users')
+        .select('email')
+        .or(`username.eq.${rawIdentifier},linked_admission_number.eq.${rawIdentifier},username.eq.PARENT-${rawIdentifier}`);
+      (allCandidates || []).forEach(u => u?.email && candidateEmails.add(u.email));
+      // Try each candidate until one succeeds
+      for (const candidate of candidateEmails) {
+        const attempt = await supabase.auth.signInWithPassword({ email: candidate, password });
+        if (!attempt.error) {
+          authData = attempt.data;
+          authError = null;
+          break;
+        }
+      }
+    }
 
     if (authError) {
       throw new AuthenticationError('Invalid email or password');
@@ -283,7 +542,7 @@ router.post('/login', [
         // Attach auth_uid on first successful login
         const { data: linked } = await supabase
           .from('users')
-          .update({ auth_uid: authData.user.id, status: byEmail.status || 'available' })
+          .update({ auth_uid: authData.user.id, status: byEmail.status || 'active' })
           .eq('id', byEmail.id)
           .select()
           .single();

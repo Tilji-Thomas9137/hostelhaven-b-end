@@ -1,73 +1,105 @@
--- Fix student data in users table to ensure full_name and username are properly set
+-- Fix student data issue by ensuring proper data exists
 -- Run this in Supabase SQL Editor
 
--- Step 1: Check current student data
-SELECT 'Current student data:' as step;
+SELECT '--- Fixing Student Data Display Issue ---' as status;
+
+-- 1. Ensure we have a student user
+INSERT INTO users (id, email, password, role, full_name, status, phone, created_at, updated_at)
 SELECT 
-    id,
-    email,
-    full_name,
-    username,
-    role,
-    status
-FROM users 
-WHERE role = 'student'
-ORDER BY email;
+    gen_random_uuid(),
+    'aswinmurali2026@mca.ajce.in',
+    '$2a$10$hashedpassword', -- This is just a placeholder
+    'student',
+    'Aswin Murali',
+    'available',
+    '9876543210',
+    NOW(),
+    NOW()
+WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = 'aswinmurali2026@mca.ajce.in');
 
--- Step 2: Update student data to ensure full_name and username are set
-SELECT 'Updating student data...' as step;
+-- 2. Get the user ID for the student
+DO $$
+DECLARE
+    student_user_id UUID;
+BEGIN
+    SELECT id INTO student_user_id FROM users WHERE email = 'aswinmurali2026@mca.ajce.in' AND role = 'student';
+    
+    IF student_user_id IS NOT NULL THEN
+        RAISE NOTICE 'Found student user ID: %', student_user_id;
+        
+        -- 3. Create user profile for the student
+        INSERT INTO user_profiles (
+            user_id, 
+            admission_number, 
+            course, 
+            batch_year, 
+            phone_number, 
+            status, 
+            profile_status,
+            created_at,
+            updated_at
+        )
+        SELECT 
+            student_user_id,
+            '13186',
+            'MCA',
+            2026,
+            '9876543210',
+            'active',
+            'completed',
+            NOW(),
+            NOW()
+        WHERE NOT EXISTS (SELECT 1 FROM user_profiles WHERE user_id = student_user_id);
+        
+        -- 4. Create parent information for the student
+        INSERT INTO parents (
+            student_id,
+            parent_name,
+            parent_email,
+            parent_phone,
+            parent_relation,
+            parent_occupation,
+            parent_address,
+            created_at,
+            updated_at
+        )
+        SELECT 
+            student_user_id,
+            'John Murali',
+            'john.murali@email.com',
+            '9123456789',
+            'Father',
+            'Engineer',
+            '123 Main Street, City, State',
+            NOW(),
+            NOW()
+        WHERE NOT EXISTS (SELECT 1 FROM parents WHERE student_id = student_user_id);
+        
+        RAISE NOTICE 'Student data created successfully for user ID: %', student_user_id;
+    ELSE
+        RAISE NOTICE 'Student user not found or not created';
+    END IF;
+END $$;
 
--- Update aswinmurali2026@mca.ajce.in with proper data
-UPDATE users 
-SET 
-    full_name = COALESCE(full_name, 'Aswin Murali'),
-    username = COALESCE(username, '13186')
-WHERE email = 'aswinmurali2026@mca.ajce.in' 
-AND role = 'student';
-
--- Update any other students that might have missing data
-UPDATE users 
-SET 
-    full_name = COALESCE(full_name, SPLIT_PART(email, '@', 1)),
-    username = COALESCE(username, SPLIT_PART(email, '@', 1))
-WHERE role = 'student' 
-AND (full_name IS NULL OR full_name = '' OR username IS NULL OR username = '');
-
--- Step 3: Verify the updates
-SELECT 'Verification after updates:' as step;
+-- 5. Verify the data was created correctly
+SELECT 'Verifying student data after fix:' as status;
 SELECT 
-    id,
-    email,
-    full_name,
-    username,
-    role,
-    status
-FROM users 
-WHERE role = 'student'
-ORDER BY email;
-
--- Step 4: Check cleaning requests and their linked student data
-SELECT 'Cleaning requests with student data:' as step;
-SELECT 
-    cr.id as cleaning_request_id,
-    cr.cleaning_type,
-    cr.status,
-    cr.student_id,
-    u.email as student_email,
-    u.full_name as student_name,
-    u.username as admission_number,
+    u.id,
+    u.email,
+    u.full_name,
     u.role,
-    CASE 
-        WHEN u.full_name IS NOT NULL AND u.full_name != '' THEN '✅ Student name available'
-        ELSE '❌ No student name'
-    END as student_name_status,
-    CASE 
-        WHEN u.username IS NOT NULL AND u.username != '' THEN '✅ Admission number available'
-        ELSE '❌ No admission number'
-    END as admission_status
-FROM cleaning_requests cr
-LEFT JOIN users u ON cr.student_id = u.id
-WHERE u.role = 'student'
-ORDER BY cr.created_at DESC;
+    u.phone,
+    up.admission_number,
+    up.course,
+    up.batch_year,
+    up.phone_number,
+    p.parent_name,
+    p.parent_email,
+    p.parent_phone,
+    p.parent_relation
+FROM users u
+LEFT JOIN user_profiles up ON u.id = up.user_id
+LEFT JOIN parents p ON u.id = p.student_id
+WHERE u.email = 'aswinmurali2026@mca.ajce.in' AND u.role = 'student';
 
 SELECT 'Student data fix completed!' as status;

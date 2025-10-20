@@ -57,7 +57,7 @@ router.get('/students', authMiddleware, staffMiddleware, asyncHandler(async (req
     }
 
     if (search) {
-      query = query.or(`admission_number.ilike.%${search}%,student_name.ilike.%${search}%`);
+      query = query.or(`admission_number.ilike.%${search}%,student_name.ilike.%${search}%,student_email.ilike.%${search}%`);
     }
 
     // Apply pagination
@@ -69,6 +69,21 @@ router.get('/students', authMiddleware, staffMiddleware, asyncHandler(async (req
       throw new Error(`Failed to fetch students: ${error.message}`);
     }
 
+    // Enrich with parent status (if any)
+    const studentsWithParent = await Promise.all((students || []).map(async (s) => {
+      try {
+        const { data: parent } = await supabaseAdmin
+          .from('users')
+          .select('status')
+          .eq('linked_admission_number', s.admission_number)
+          .eq('role', 'parent')
+          .maybeSingle();
+        return { ...s, parent_status: parent?.status || null };
+      } catch {
+        return { ...s, parent_status: null };
+      }
+    }));
+
     // Get total count for pagination
     let countQuery = supabaseAdmin
       .from('admission_registry')
@@ -79,7 +94,7 @@ router.get('/students', authMiddleware, staffMiddleware, asyncHandler(async (req
     }
 
     if (search) {
-      countQuery = countQuery.or(`admission_number.ilike.%${search}%,student_name.ilike.%${search}%`);
+      countQuery = countQuery.or(`admission_number.ilike.%${search}%,student_name.ilike.%${search}%,student_email.ilike.%${search}%`);
     }
 
     const { count } = await countQuery;
@@ -87,7 +102,7 @@ router.get('/students', authMiddleware, staffMiddleware, asyncHandler(async (req
     res.json({
       success: true,
       data: { 
-        students: students || [],
+        students: studentsWithParent || [],
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -314,19 +329,23 @@ router.post('/students', authMiddleware, staffMiddleware, [
     }
 
     // Create admission registry entry FIRST (required for foreign key constraint)
+    // Store all student information in admission_registry table
     const { data: newStudent, error: studentError } = await supabaseAdmin
       .from('admission_registry')
       .insert({
+        user_id: newStudentUser.id,  // Link to the user account
         admission_number,
         student_name: full_name,
+        student_email: student_email,
+        student_phone: student_phone,
+        parent_name: parent_name,
+        parent_email: parent_email,
+        parent_phone: parent_phone,
+        parent_relation: parent_relation,
         course,
         batch_year: parseInt(year),
-        student_email,
-        student_phone,
-        parent_name,
-        parent_email,
-        parent_phone,
-        added_by: req.user.dbId || null  // Use database ID, not auth UUID
+        semester: '1',  // Default semester
+        status: 'pending'  // Default status
       })
       .select()
       .single();
@@ -437,6 +456,10 @@ router.post('/students', authMiddleware, staffMiddleware, [
             .from('parents')
             .update({
               student_profile_id: studentProfile.id,
+              parent_name: parent_name,
+              parent_email: parent_email,
+              parent_phone: parent_phone,
+              parent_relation: parent_relation,
               email: parent_email,
               phone: parent_phone,
               verified: true, // Auto-verify parents created by admin
@@ -450,6 +473,10 @@ router.post('/students', authMiddleware, staffMiddleware, [
             .insert({
               user_id: newParentUser.id,
               student_profile_id: studentProfile.id,
+              parent_name: parent_name,
+              parent_email: parent_email,
+              parent_phone: parent_phone,
+              parent_relation: parent_relation,
               email: parent_email,
               phone: parent_phone,
               verified: true, // Auto-verify parents created by admin
@@ -595,16 +622,17 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
       throw new ValidationError('Student not found');
     }
 
-    // Prepare update data (only include fields that exist in the schema)
+    // Prepare update data (include all student information fields)
     const updateData = {};
     if (full_name) updateData.student_name = full_name;
     if (course) updateData.course = course;
     if (year) updateData.batch_year = parseInt(year);
+    if (student_email) updateData.student_email = student_email;
+    if (student_phone) updateData.student_phone = student_phone;
     if (parent_name) updateData.parent_name = parent_name;
     if (parent_phone) updateData.parent_phone = parent_phone;
     if (parent_email) updateData.parent_email = parent_email;
-    if (student_email) updateData.student_email = student_email;
-    if (student_phone) updateData.student_phone = student_phone;
+    if (parent_relation) updateData.parent_relation = parent_relation;
     if (status) updateData.status = status;
 
     // Update student record using service role to bypass RLS
@@ -644,6 +672,30 @@ router.put('/students/:admission_number', authMiddleware, staffMiddleware, [
         console.warn('Error finding user account:', userError.message);
       } else {
         console.log(`No user account found for email: ${existingStudent.student_email}`);
+      }
+
+      // Also cascade status to the linked parent (if any)
+      try {
+        const { data: parentUser } = await supabaseAdmin
+          .from('users')
+          .select('id, email')
+          .eq('linked_admission_number', admission_number)
+          .eq('role', 'parent')
+          .maybeSingle();
+
+        if (parentUser) {
+          const { error: parentStatusErr } = await supabaseAdmin
+            .from('users')
+            .update({ status })
+            .eq('id', parentUser.id);
+          if (parentStatusErr) {
+            console.warn('Failed to update parent status:', parentStatusErr.message);
+          } else {
+            console.log(`Updated parent status to ${status} for parent ${parentUser.id}`);
+          }
+        }
+      } catch (cascadeErr) {
+        console.warn('Cascade parent status warning:', cascadeErr?.message || cascadeErr);
       }
     }
 
@@ -709,7 +761,7 @@ router.delete('/students/:admission_number', authMiddleware, staffMiddleware, as
     // Check if student exists and get associated user info
     const { data: existingStudent, error: fetchError } = await supabaseAdmin
       .from('admission_registry')
-      .select('admission_number, student_email')
+      .select('admission_number, user_id')
       .eq('admission_number', admission_number)
       .single();
 
@@ -721,7 +773,7 @@ router.delete('/students/:admission_number', authMiddleware, staffMiddleware, as
     const { data: studentUser, error: studentUserError } = await supabaseAdmin
       .from('users')
       .select('id, auth_uid, email')
-      .eq('email', existingStudent.student_email)
+      .eq('id', existingStudent.user_id)
       .single();
 
     // Find parent user account
@@ -879,9 +931,9 @@ router.post('/students/:id/activate', authMiddleware, async (req, res, next) => 
       throw new ValidationError('Student is already activated');
     }
 
-    // Create auth user
+    // Create auth user for the student (use schema fields)
     const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
-      email: student.email,
+      email: student.student_email || student.email,
       password,
       email_confirm: true
     });
@@ -896,11 +948,11 @@ router.post('/students/:id/activate', authMiddleware, async (req, res, next) => 
       .insert({
         auth_uid: authUser.user.id,
         admission_number: student.admission_number,
-        full_name: student.full_name,
-        email: student.email,
-        phone: student.phone,
+        full_name: student.student_name || student.full_name,
+        email: student.student_email || student.email,
+        phone: student.student_phone || student.phone,
         course: student.course,
-        year: student.year,
+        year: student.batch_year || student.year,
         status: 'active'
       })
       .select()
@@ -918,10 +970,113 @@ router.post('/students/:id/activate', authMiddleware, async (req, res, next) => 
       .update({ status: 'active' })
       .eq('id', id);
 
+    // Also activate the linked parent (if any)
+    let activatedParent = null;
+    try {
+      // 1) Find parent user by linked admission number
+      const { data: parentUser } = await supabase
+        .from('users')
+        .select('*')
+        .eq('linked_admission_number', student.admission_number)
+        .eq('role', 'parent')
+        .maybeSingle();
+
+      let resolvedParent = parentUser;
+      // Fallback: try by parent email in registry if not found via linked_admission_number
+      if (!resolvedParent && (student.parent_email || student.parent_email === '')) {
+        const { data: byEmail } = await supabase
+          .from('users')
+          .select('*')
+          .eq('email', student.parent_email)
+          .eq('role', 'parent')
+          .maybeSingle();
+        resolvedParent = byEmail || null;
+      }
+
+      if (resolvedParent) {
+        let parentAuthUid = resolvedParent.auth_uid;
+        let parentAuthCreated = false;
+
+        // 2) Create Supabase Auth user for parent if none
+        if (!parentAuthUid && resolvedParent.email) {
+          const randomPassword = Math.random().toString(36).slice(-8) + 'A1!';
+          const { data: parentAuth, error: parentAuthErr } = await supabaseAdmin.auth.admin.createUser({
+            email: resolvedParent.email,
+            password: randomPassword,
+            email_confirm: true
+          });
+          if (!parentAuthErr && parentAuth?.user?.id) {
+            parentAuthUid = parentAuth.user.id;
+            parentAuthCreated = true;
+          }
+        }
+
+        // 3) Update users row to active and set auth_uid if obtained
+        const userUpdates = { status: 'active' };
+        if (parentAuthUid) userUpdates.auth_uid = parentAuthUid;
+        const { data: updatedParentUser, error: parentUpdErr } = await supabaseAdmin
+          .from('users')
+          .update(userUpdates)
+          .eq('id', resolvedParent.id)
+          .select()
+          .single();
+        if (parentUpdErr) {
+          console.warn('Parent status update error:', parentUpdErr.message);
+        }
+
+        activatedParent = updatedParentUser || resolvedParent;
+
+        // 4) Verify parents table row if present
+        const { data: parentRow } = await supabaseAdmin
+          .from('parents')
+          .select('id')
+          .eq('user_id', resolvedParent.id)
+          .maybeSingle();
+
+        if (parentRow) {
+          await supabaseAdmin
+            .from('parents')
+            .update({ verified: true, otp_code: null, otp_expires_at: null })
+            .eq('id', parentRow.id);
+        }
+
+        // 5) Email the parent a password/setup link
+        try {
+          if (resolvedParent.email) {
+            const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+            // Use Supabase to generate a recovery link so parent can set a password
+            await supabaseAdmin.auth.admin.generateLink({
+              type: 'recovery',
+              email: resolvedParent.email,
+              options: { redirectTo: `${frontendUrl}/reset-password` }
+            });
+            // Optionally send our custom notification email as well if mailer exists
+            try {
+              const { sendActivationEmailHybrid } = require('../utils/hybrid-mailer');
+              await sendActivationEmailHybrid({
+                to: resolvedParent.email,
+                fullName: resolvedParent.full_name || 'Parent',
+                username: resolvedParent.username || `PARENT-${String(student.admission_number)}`,
+                activationLink: `${frontendUrl}/reset-password`,
+                otpCode: null
+              });
+            } catch (mailWarn) {
+              console.warn('Parent email dispatch warning:', mailWarn?.message || mailWarn);
+            }
+          }
+        } catch (emailErr) {
+          console.warn('Parent password link generation warning:', emailErr?.message || emailErr);
+        }
+      }
+    } catch (e) {
+      console.warn('Parent activation step warning:', e?.message || e);
+    }
+
     res.json({
       success: true,
       data: { 
         user: newUserProfile,
+        parent: activatedParent,
         message: 'Student activated successfully'
       }
     });

@@ -28,6 +28,7 @@ const configureRoutes = (app) => {
   const parcelManagementRoutes = require('../routes/parcel-management');
   const cleaningManagementRoutes = require('../routes/cleaning-management');
   const cleaningRequestsRoutes = require('../routes/cleaning-requests');
+  const adminStudentsRoutes = require('../routes/admin-students');
   const studentProfileRoutes = require('../routes/student-profile');
   const authHooksRoutes = require('../routes/auth-hooks');
   const studentCleaningRequestsRoutes = require('../routes/student-cleaning-requests');
@@ -71,6 +72,7 @@ const configureRoutes = (app) => {
   app.use('/api/parcel-management', parcelManagementRoutes);
   app.use('/api/cleaning-management', cleaningManagementRoutes);
   app.use('/api/cleaning-requests', cleaningRequestsRoutes);
+  app.use('/api/admin/students', adminStudentsRoutes);
   // Supabase Auth Hooks endpoint (Signup/Invite)
   app.use('/api/auth-hooks', authHooksRoutes);
   // Student Profile endpoint
