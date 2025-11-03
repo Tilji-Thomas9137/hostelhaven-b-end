@@ -76,18 +76,52 @@ router.get('/', authMiddleware, studentMiddleware, asyncHandler(async (req, res)
  * @access  Private (Student)
  */
 router.post('/', authMiddleware, studentMiddleware, [
-  body('title').isString().isLength({ min: 5, max: 100 }).withMessage('Title must be between 5 and 100 characters'),
-  body('description').isString().isLength({ min: 20 }).withMessage('Description must be at least 20 characters'),
-  body('category').isIn(['maintenance', 'cleanliness', 'noise', 'security', 'food', 'other']).withMessage('Invalid category'),
-  body('priority').isIn(['low', 'medium', 'high']).withMessage('Invalid priority')
+  body('title').trim().notEmpty().isLength({ min: 5, max: 100 }).withMessage('Title must be between 5 and 100 characters'),
+  body('description').trim().notEmpty().isLength({ min: 10 }).withMessage('Description must be at least 10 characters'),
+  body('category').trim().notEmpty().isIn([
+    'maintenance', 'cleanliness', 'noise', 'security', 'food', 'other',
+    'wifi_issue', 'bathroom_dirt', 'electric', 'plumbing', 'mess_food_quality'
+  ]).withMessage('Invalid category'),
+  body('priority').trim().notEmpty().isIn(['low', 'medium', 'high', 'urgent']).withMessage('Invalid priority')
 ], asyncHandler(async (req, res) => {
   try {
+    // Log incoming request for debugging
+    console.log('📝 Complaint submission request:', {
+      body: req.body,
+      user: req.user?.id
+    });
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      throw new ValidationError(errors.array()[0].msg);
+      console.error('❌ Validation errors:', errors.array());
+      throw new ValidationError(errors.array()[0].msg, errors.array());
     }
 
-    const { title, description, category, priority } = req.body;
+    let { title, description, category, priority } = req.body;
+    
+    // Trim and ensure all fields are strings
+    title = String(title || '').trim();
+    description = String(description || '').trim();
+    category = String(category || '').trim();
+    priority = String(priority || '').trim();
+
+    // Map frontend categories to backend categories if needed
+    const categoryMap = {
+      'wifi_issue': 'maintenance',
+      'bathroom_dirt': 'cleanliness',
+      'electric': 'maintenance',
+      'plumbing': 'maintenance',
+      'mess_food_quality': 'food'
+    };
+    
+    if (categoryMap[category]) {
+      category = categoryMap[category];
+    }
+
+    // Ensure priority is valid (map 'urgent' to 'high' if backend doesn't support it)
+    if (priority === 'urgent') {
+      priority = 'high';
+    }
 
     // Get user's ID and profile
     const { data: userRow } = await supabase
@@ -130,17 +164,19 @@ router.post('/', authMiddleware, studentMiddleware, [
 
     if (error) {
       console.error('Error creating complaint:', error);
-      throw new ValidationError('Failed to create complaint');
+      console.error('Error details:', JSON.stringify(error, null, 2));
+      throw new ValidationError(error.message || `Failed to create complaint: ${error.code || 'Unknown error'}`);
     }
 
-    // Notify staff about the new complaint
+    // Notify staff and parents about the new complaint
     try {
+      // Notify staff (admin, warden, hostel operations assistant)
       const { data: staffList } = await supabase
         .from('users')
         .select('id, role')
         .in('role', ['admin', 'warden', 'hostel_operations_assistant']);
 
-      const notifications = (staffList || []).map((staffUser) => ({
+      const staffNotifications = (staffList || []).map((staffUser) => ({
         user_id: staffUser.id,
         type: 'complaint',
         title: 'New Complaint',
@@ -156,8 +192,55 @@ router.post('/', authMiddleware, studentMiddleware, [
         created_at: new Date().toISOString()
       }));
 
-      if (notifications.length > 0) {
-        await supabase.from('notifications').insert(notifications);
+      // Notify parents of the student
+      // First, get the student's profile ID
+      const { data: studentProfile } = await supabase
+        .from('user_profiles')
+        .select('id')
+        .eq('user_id', userRow.id)
+        .single();
+
+      let parentNotifications = [];
+      if (studentProfile) {
+        // Get verified parents linked to this student
+        const { data: parentRecords } = await supabase
+          .from('parents')
+          .select('user_id')
+          .eq('student_profile_id', studentProfile.id)
+          .eq('verified', true);
+
+        if (parentRecords && parentRecords.length > 0) {
+          // Get parent user IDs
+          const parentIds = parentRecords.map(p => p.user_id);
+          const { data: parentUsers } = await supabase
+            .from('users')
+            .select('id')
+            .in('id', parentIds);
+          
+          if (parentUsers) {
+            parentNotifications = parentUsers.map((parentUser) => ({
+              user_id: parentUser.id,
+              type: 'complaint',
+              title: 'New Complaint from Student',
+              message: `${userRow.full_name} has submitted a ${priority} priority complaint: ${title}`,
+              metadata: {
+                complaint_id: complaint.id,
+                student_id: userRow.id,
+                category,
+                priority,
+                title
+              },
+              is_read: false,
+              created_at: new Date().toISOString()
+            }));
+          }
+        }
+      }
+
+      // Insert all notifications
+      const allNotifications = [...staffNotifications, ...parentNotifications];
+      if (allNotifications.length > 0) {
+        await supabase.from('notifications').insert(allNotifications);
       }
     } catch (notificationError) {
       console.error('Error sending notifications:', notificationError);

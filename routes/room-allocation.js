@@ -563,13 +563,16 @@ router.put('/requests/:id/approve', authMiddleware, adminMiddleware, [
       try {
         const { error: createNewErr } = await supabase
           .from('room_allocations')
-          .insert({
+          .upsert({
             user_id: request.user_id,
             room_id: room_id,
             allocated_at: startDate,
             allocated_by: req.user.id,
             allocation_type: 'manual',
             status: 'active'
+          }, {
+            onConflict: 'user_id',
+            ignoreDuplicates: false
           });
         if (!createNewErr) created = true;
       } catch (_) { /* ignore */ }
@@ -959,6 +962,10 @@ router.get('/waitlist', authMiddleware, adminMiddleware, asyncHandler(async (req
  */
 router.put('/request/:requestId/cancel', authMiddleware, asyncHandler(async (req, res) => {
   const { requestId } = req.params;
+  
+  console.log('🔍 CANCEL: Route params:', req.params);
+  console.log('🔍 CANCEL: Extracted requestId:', requestId);
+  console.log('🔍 CANCEL: Request URL:', req.url);
 
   // First, resolve the user's database ID from auth_uid
   const { data: userRow, error: userError } = await supabase
@@ -972,14 +979,36 @@ router.put('/request/:requestId/cancel', authMiddleware, asyncHandler(async (req
   }
 
   // Check if user owns this request
+  console.log('🔍 CANCEL: Looking for request with ID:', requestId, 'Type:', typeof requestId);
+  
   const { data: request, error: checkError } = await supabase
     .from('room_requests')
-    .select('user_id, status')
+    .select('user_id, status, id')
     .eq('id', requestId)
     .single();
 
+  console.log('🔍 CANCEL: Query result:', { request, checkError });
+
   if (checkError || !request) {
-    throw new ValidationError('Request not found');
+    console.error('❌ CANCEL: Request not found. Error:', checkError);
+    
+    // Debug: Check if any requests exist with similar IDs
+    const { data: allRequests, error: allError } = await supabase
+      .from('room_requests')
+      .select('id, status, user_id')
+      .order('created_at', { ascending: false })
+      .limit(5);
+    
+    console.log('🔍 CANCEL: All room requests:', allRequests);
+    
+    // Provide more specific error message
+    if (checkError && checkError.code === 'PGRST116') {
+      throw new ValidationError(`Room request with ID '${requestId}' does not exist`);
+    } else if (checkError) {
+      throw new ValidationError(`Database error: ${checkError.message}`);
+    } else {
+      throw new ValidationError(`Room request with ID '${requestId}' not found`);
+    }
   }
 
   // Check ownership using user_id (auth_uid column doesn't exist in room_requests)
@@ -1021,6 +1050,10 @@ router.put('/request/:requestId/cancel', authMiddleware, asyncHandler(async (req
  */
 router.delete('/request/:requestId', authMiddleware, asyncHandler(async (req, res) => {
   const { requestId } = req.params;
+  
+  console.log('🔍 DELETE: Looking for request with ID:', requestId, 'Type:', typeof requestId);
+  console.log('🔍 DELETE: Route params:', req.params);
+  console.log('🔍 DELETE: Request URL:', req.url);
 
   // First, resolve the user's database ID from auth_uid
   const { data: userRow, error: userError } = await supabase

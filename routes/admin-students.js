@@ -9,15 +9,13 @@ const router = express.Router();
 // Middleware to check if user is admin
 const adminMiddleware = async (req, res, next) => {
   try {
-    const { data: { session } } = await supabase.auth.getUser(req.user.access_token);
-    if (!session?.user) {
-      throw new ValidationError('Authentication required');
-    }
+    // The auth middleware already verified the token and set req.user
+    // We can directly use req.user.id which contains the auth_uid
 
     const { data: userProfile } = await supabase
       .from('users')
       .select('role')
-      .eq('auth_uid', session.user.id)
+      .eq('auth_uid', req.user.id)
       .single();
 
     if (!userProfile || userProfile.role !== 'admin') {
@@ -116,11 +114,10 @@ router.post('/', authMiddleware, adminMiddleware, [
     }
 
     // Get admin user ID
-    const { data: { session } } = await supabase.auth.getUser(req.user.access_token);
     const { data: adminUser } = await supabase
       .from('users')
       .select('id')
-      .eq('auth_uid', session.user.id)
+      .eq('auth_uid', req.user.id)
       .single();
 
     // Insert new student

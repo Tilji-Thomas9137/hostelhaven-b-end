@@ -6,6 +6,10 @@ const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
+// ============================================================================
+// UNIFIED ROOM REQUEST SYSTEM - FULLY FUNCTIONAL ENDPOINTS
+// ============================================================================
+
 // Middleware to check student access
 const studentMiddleware = async (req, res, next) => {
   try {
@@ -1286,7 +1290,7 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
 
   try {
     // Get staff user profile
-    const { data: staff, error: staffError } = await supabase
+    const { data: staff, error: staffError } = await supabaseAdmin
       .from('users')
       .select('id, full_name')
       .eq('auth_uid', req.user.id)
@@ -1299,7 +1303,7 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
     // Get room request with detailed logging
     console.log('🔍 APPROVAL: Looking for room request with ID:', id);
     
-    const { data: requestData, error: requestError } = await supabase
+    const { data: requestData, error: requestError } = await supabaseAdmin
       .from('room_requests')
       .select(`
         id,
@@ -1323,7 +1327,7 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
       console.error('❌ APPROVAL: Room request not found for ID:', id);
       
       // Check if any room requests exist at all
-      const { data: allRequests, error: allError } = await supabase
+      const { data: allRequests, error: allError } = await supabaseAdmin
         .from('room_requests')
         .select('id, status, created_at')
         .order('created_at', { ascending: false })
@@ -1338,7 +1342,7 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
     }
 
     // Check if room is available
-    const { data: roomData, error: roomError } = await supabase
+    const { data: roomData, error: roomError } = await supabaseAdmin
       .from('rooms')
       .select('id, room_number, capacity, current_occupancy, status')
       .eq('id', room_id);
@@ -1359,7 +1363,7 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
     }
 
     // Update request status
-    const { error: updateError } = await supabase
+    const { error: updateError } = await supabaseAdmin
       .from('room_requests')
       .update({
         status: 'approved',
@@ -1373,32 +1377,41 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
       throw new Error(`Failed to update request: ${updateError.message}`);
     }
 
-    // Create room allocation
-    const { data: newAllocation, error: allocationError } = await supabase
+    // Create room allocation with ON CONFLICT handling
+    console.log('🔍 APPROVAL: Creating room allocation for user:', request.user_id, 'room:', room_id);
+    
+    const { data: newAllocation, error: allocationError } = await supabaseAdmin
       .from('room_allocations')
-      .insert({
+      .upsert({
         user_id: request.user_id,
         room_id: room_id,
         allocation_status: 'confirmed',
         allocated_at: new Date().toISOString(),
         start_date: new Date().toISOString().split('T')[0], // Add required start_date (YYYY-MM-DD format)
-        allocation_date: new Date().toISOString() // Also add allocation_date
+        allocation_date: new Date().toISOString(), // Also add allocation_date
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'user_id', // This will update if user_id already exists
+        ignoreDuplicates: false
       })
       .select()
       .single();
 
     if (allocationError) {
+      console.error('❌ APPROVAL: Room allocation error:', allocationError);
       // Rollback request update
-      await supabase.from('room_requests').update({ status: 'pending' }).eq('id', id);
+      await supabaseAdmin.from('room_requests').update({ status: 'pending' }).eq('id', id);
       throw new Error(`Failed to create room allocation: ${allocationError.message}`);
     }
+
+    console.log('✅ APPROVAL: Room allocation created successfully:', newAllocation);
 
     // Update room occupancy
     const newOccupancy = room.current_occupancy + 1;
     const newStatus = newOccupancy >= room.capacity ? 'full' : 
                      newOccupancy > 0 ? 'partially_filled' : 'available';
 
-    const { error: roomUpdateError } = await supabase
+    const { error: roomUpdateError } = await supabaseAdmin
       .from('rooms')
       .update({
         current_occupancy: newOccupancy,
@@ -1411,14 +1424,28 @@ router.put('/:id/approve', authMiddleware, async (req, res, next) => {
       console.warn(`Failed to update room occupancy: ${roomUpdateError.message}`);
     }
 
-    // Update student's room_id
-    const { error: studentUpdateError } = await supabase
+    // Update student's room_id in user_profiles table
+    console.log('🔍 APPROVAL: Updating student profile with room_id:', room_id);
+    const { error: studentUpdateError } = await supabaseAdmin
       .from('user_profiles')
       .update({ room_id: room_id })
-      .eq('id', request.user_id);
+      .eq('user_id', request.user_id);
 
     if (studentUpdateError) {
       console.warn(`Failed to update student room_id: ${studentUpdateError.message}`);
+      // Also try updating the users table as fallback
+      const { error: userUpdateError } = await supabaseAdmin
+        .from('users')
+        .update({ room_id: room_id })
+        .eq('id', request.user_id);
+      
+      if (userUpdateError) {
+        console.warn(`Failed to update user room_id: ${userUpdateError.message}`);
+      } else {
+        console.log('✅ APPROVAL: Updated users table with room_id');
+      }
+    } else {
+      console.log('✅ APPROVAL: Updated user_profiles table with room_id');
     }
 
     res.json({
@@ -2048,6 +2075,623 @@ router.get('/debug-check', asyncHandler(async (req, res) => {
       success: false,
       error: error.message
     });
+  }
+}));
+
+// ============================================================================
+// UNIFIED ROOM REQUEST ENDPOINTS - FULLY FUNCTIONAL
+// ============================================================================
+
+/**
+ * @route   POST /api/room-requests/unified/create
+ * @desc    Create a new room request (unified endpoint)
+ * @access  Private (Student)
+ */
+router.post('/unified/create', authMiddleware, [
+  body('preferred_room_type').isIn(['single', 'double', 'triple']).withMessage('Invalid room type'),
+  body('preferred_floor').optional().isInt({ min: 1, max: 8 }).withMessage('Floor must be between 1 and 8'),
+  body('special_requirements').optional().isString().withMessage('Special requirements must be text'),
+  body('urgency_level').optional().isIn(['low', 'medium', 'high']).withMessage('Invalid urgency level'),
+  body('requested_room_id').optional().isUUID().withMessage('Invalid room ID')
+], asyncHandler(async (req, res) => {
+  console.log('🚀 UNIFIED CREATE: Starting room request creation...');
+  console.log('🚀 UNIFIED CREATE: User ID:', req.user.id);
+  console.log('🚀 UNIFIED CREATE: Request body:', req.body);
+  
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    console.log('❌ UNIFIED CREATE: Validation failed:', errors.array());
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { preferred_room_type, preferred_floor, special_requirements, urgency_level, requested_room_id } = req.body;
+
+  try {
+    // Get user information
+    const { data: userRow, error: userError } = await supabase
+      .from('users')
+      .select('id, email, role, room_id')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (userError || !userRow) {
+      console.error('❌ UNIFIED CREATE: User not found:', userError);
+      throw new ValidationError('User not found');
+    }
+
+    console.log('✅ UNIFIED CREATE: User found:', userRow.id);
+
+    // Check if user already has an active request
+    const { data: existingRequest, error: checkError } = await supabase
+      .from('room_requests')
+      .select('id, status, created_at')
+      .eq('user_id', userRow.id)
+      .in('status', ['pending', 'waitlisted', 'approved'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingRequest) {
+      console.log('❌ UNIFIED CREATE: User already has active request:', existingRequest);
+      throw new ValidationError(`You already have an active room request (${existingRequest.status})`);
+    }
+
+    // Check if user already has a room allocated
+    if (userRow.room_id) {
+      console.log('❌ UNIFIED CREATE: User already has room:', userRow.room_id);
+      throw new ValidationError('You already have a room allocated');
+    }
+
+    // Check if requested room exists and is available
+    let roomValidation = null;
+    if (requested_room_id) {
+      const { data: roomData, error: roomError } = await supabase
+        .from('rooms')
+        .select('id, room_number, capacity, current_occupancy, status')
+        .eq('id', requested_room_id)
+        .single();
+
+      if (roomError || !roomData) {
+        throw new ValidationError('Requested room not found');
+      }
+
+      if (roomData.current_occupancy >= roomData.capacity) {
+        throw new ValidationError('Requested room is at full capacity');
+      }
+
+      if (!['available', 'partially_filled'].includes(roomData.status)) {
+        throw new ValidationError('Requested room is not available');
+      }
+
+      roomValidation = roomData;
+    }
+
+    // Prepare insert data
+    const insertData = {
+      user_id: userRow.id,
+      preferred_room_type,
+      preferred_floor: preferred_floor || null,
+      special_requirements: special_requirements || null,
+      urgency_level: urgency_level || 'medium',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    // Add room-specific information if room was requested
+    if (requested_room_id) {
+      insertData.requested_room_id = requested_room_id;
+      insertData.special_requirements = special_requirements 
+        ? `${special_requirements}\nREQUESTED_ROOM_ID:${requested_room_id}`
+        : `REQUESTED_ROOM_ID:${requested_room_id}`;
+    }
+
+    console.log('📝 UNIFIED CREATE: Inserting with data:', insertData);
+
+    // Create the room request with fallback for missing column
+    let newRequest, createError;
+    
+    try {
+      const result = await supabaseAdmin
+        .from('room_requests')
+        .insert(insertData)
+        .select()
+        .single();
+      
+      newRequest = result.data;
+      createError = result.error;
+    } catch (fallbackError) {
+      console.log('⚠️ UNIFIED CREATE: Primary insert failed, trying fallback without requested_room_id...');
+      
+      // Fallback: Remove requested_room_id and try again
+      const fallbackData = { ...insertData };
+      delete fallbackData.requested_room_id;
+      
+      // Ensure special_requirements contains the room ID
+      if (requested_room_id) {
+        fallbackData.special_requirements = special_requirements 
+          ? `${special_requirements}\nREQUESTED_ROOM_ID:${requested_room_id}`
+          : `REQUESTED_ROOM_ID:${requested_room_id}`;
+      }
+      
+      const fallbackResult = await supabaseAdmin
+        .from('room_requests')
+        .insert(fallbackData)
+        .select()
+        .single();
+      
+      newRequest = fallbackResult.data;
+      createError = fallbackResult.error;
+      
+      if (!createError) {
+        console.log('✅ UNIFIED CREATE: Fallback insert successful');
+      }
+    }
+
+    if (createError) {
+      console.error('❌ UNIFIED CREATE: Database error:', createError);
+      
+      // Check if it's a missing column error
+      if (createError.message && createError.message.includes('requested_room_id')) {
+        throw new ValidationError('Database schema error: requested_room_id column is missing. Please run the database setup script to add the missing column.');
+      }
+      
+      throw new ValidationError(`Failed to create room request: ${createError.message}`);
+    }
+
+    if (!newRequest) {
+      console.error('❌ UNIFIED CREATE: No data returned');
+      throw new ValidationError('Room request creation failed - no data returned');
+    }
+
+    console.log('✅ UNIFIED CREATE: Successfully created:', newRequest.id);
+
+    // Return success response
+    res.status(201).json({
+      success: true,
+      message: 'Room request submitted successfully',
+      data: {
+        request: {
+          id: newRequest.id,
+          user_id: newRequest.user_id,
+          preferred_room_type: newRequest.preferred_room_type,
+          preferred_floor: newRequest.preferred_floor,
+          special_requirements: newRequest.special_requirements,
+          urgency_level: newRequest.urgency_level,
+          status: newRequest.status,
+          created_at: newRequest.created_at
+        },
+        room_info: roomValidation ? {
+          room_number: roomValidation.room_number,
+          capacity: roomValidation.capacity,
+          current_occupancy: roomValidation.current_occupancy
+        } : null
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ UNIFIED CREATE: Error:', error);
+    throw error;
+  }
+}));
+
+/**
+ * @route   PUT /api/room-requests/unified/:id/approve
+ * @desc    Approve room request and automatically allocate room
+ * @access  Private (Staff/Admin)
+ */
+router.put('/unified/:id/approve', authMiddleware, staffMiddleware, [
+  body('room_id').isUUID().withMessage('Valid room ID is required'),
+  body('notes').optional().isString().withMessage('Notes must be text')
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { id } = req.params;
+  const { room_id, notes } = req.body;
+
+  console.log('🔍 UNIFIED APPROVAL: Starting approval process for request:', id, 'room:', room_id);
+
+  try {
+    // Get staff user profile
+    const { data: staff, error: staffError } = await supabase
+      .from('users')
+      .select('id, full_name, role')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (staffError || !staff) {
+      throw new ValidationError('Staff profile not found');
+    }
+
+    console.log('✅ UNIFIED APPROVAL: Staff found:', staff.full_name);
+
+    // Get room request
+    const { data: requestData, error: requestError } = await supabase
+      .from('room_requests')
+      .select(`
+        id,
+        user_id,
+        preferred_room_type,
+        status,
+        created_at
+      `)
+      .eq('id', id)
+      .single();
+
+    if (requestError || !requestData) {
+      console.error('❌ UNIFIED APPROVAL: Request not found:', requestError);
+      throw new ValidationError('Room request not found');
+    }
+
+    const request = requestData;
+    console.log('✅ UNIFIED APPROVAL: Request found:', request.id, 'Status:', request.status);
+
+    if (request.status !== 'pending') {
+      throw new ValidationError(`Cannot approve request with status: ${request.status}`);
+    }
+
+    // Check if room is available
+    const { data: roomData, error: roomError } = await supabase
+      .from('rooms')
+      .select('id, room_number, capacity, current_occupancy, status')
+      .eq('id', room_id)
+      .single();
+
+    if (roomError || !roomData) {
+      throw new ValidationError('Room not found');
+    }
+
+    const room = roomData;
+    console.log('✅ UNIFIED APPROVAL: Room found:', room.room_number, 'Capacity:', room.capacity, 'Current:', room.current_occupancy);
+
+    if (room.current_occupancy >= room.capacity) {
+      throw new ValidationError('Room is at full capacity');
+    }
+
+    if (!['available', 'partially_filled'].includes(room.status)) {
+      throw new ValidationError('Room is not available for allocation');
+    }
+
+    // Start transaction-like operations
+    console.log('🔄 UNIFIED APPROVAL: Starting approval and allocation process...');
+
+    // 1. Update request status
+    const { error: updateError } = await supabase
+      .from('room_requests')
+      .update({
+        status: 'approved',
+        processed_at: new Date().toISOString(),
+        processed_by: staff.id,
+        notes: notes || 'Request approved and room allocated',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+
+    if (updateError) {
+      console.error('❌ UNIFIED APPROVAL: Failed to update request:', updateError);
+      throw new Error(`Failed to update request: ${updateError.message}`);
+    }
+
+    console.log('✅ UNIFIED APPROVAL: Request status updated to approved');
+
+    // 2. Create room allocation
+    const { data: newAllocation, error: allocationError } = await supabase
+      .from('room_allocations')
+      .upsert({
+        user_id: request.user_id,
+        room_id: room_id,
+        allocation_status: 'confirmed',
+        allocated_at: new Date().toISOString(),
+        start_date: new Date().toISOString().split('T')[0],
+        allocation_date: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'user_id',
+        ignoreDuplicates: false
+      })
+      .select()
+      .single();
+
+    if (allocationError) {
+      console.error('❌ UNIFIED APPROVAL: Room allocation error:', allocationError);
+      // Rollback request update
+      await supabase.from('room_requests').update({ status: 'pending' }).eq('id', id);
+      throw new Error(`Failed to create room allocation: ${allocationError.message}`);
+    }
+
+    console.log('✅ UNIFIED APPROVAL: Room allocation created:', newAllocation.id);
+
+    // 3. Update room occupancy
+    const newOccupancy = room.current_occupancy + 1;
+    const newStatus = newOccupancy >= room.capacity ? 'full' : 
+                     newOccupancy > 0 ? 'partially_filled' : 'available';
+
+    const { error: roomUpdateError } = await supabase
+      .from('rooms')
+      .update({
+        current_occupancy: newOccupancy,
+        status: newStatus,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', room_id);
+
+    if (roomUpdateError) {
+      console.warn(`⚠️ UNIFIED APPROVAL: Failed to update room occupancy: ${roomUpdateError.message}`);
+    } else {
+      console.log('✅ UNIFIED APPROVAL: Room occupancy updated:', newOccupancy, 'Status:', newStatus);
+    }
+
+    // 4. Update student's profile with room_id
+    const { error: studentUpdateError } = await supabase
+      .from('user_profiles')
+      .update({ 
+        room_id: room_id,
+        updated_at: new Date().toISOString()
+      })
+      .eq('user_id', request.user_id);
+
+    if (studentUpdateError) {
+      console.warn(`⚠️ UNIFIED APPROVAL: Failed to update student profile: ${studentUpdateError.message}`);
+      // Also try updating the users table as fallback
+      const { error: userUpdateError } = await supabase
+        .from('users')
+        .update({ 
+          room_id: room_id,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', request.user_id);
+      
+      if (userUpdateError) {
+        console.warn(`⚠️ UNIFIED APPROVAL: Failed to update user table: ${userUpdateError.message}`);
+      } else {
+        console.log('✅ UNIFIED APPROVAL: Updated users table with room_id');
+      }
+    } else {
+      console.log('✅ UNIFIED APPROVAL: Updated user_profiles table with room_id');
+    }
+
+    // 5. Get student information for response
+    const { data: studentInfo } = await supabase
+      .from('users')
+      .select('email, full_name, linked_admission_number')
+      .eq('id', request.user_id)
+      .single();
+
+    console.log('🎉 UNIFIED APPROVAL: Complete! Request approved and room allocated successfully');
+
+    // Return success response
+    res.json({
+      success: true,
+      message: 'Room request approved and allocated successfully',
+      data: {
+        request_id: id,
+        allocation: {
+          id: newAllocation.id,
+          user_id: newAllocation.user_id,
+          room_id: newAllocation.room_id,
+          allocation_status: newAllocation.allocation_status,
+          start_date: newAllocation.start_date,
+          allocated_at: newAllocation.allocated_at
+        },
+        room: {
+          id: room.id,
+          room_number: room.room_number,
+          capacity: room.capacity,
+          current_occupancy: newOccupancy,
+          status: newStatus
+        },
+        student: studentInfo ? {
+          email: studentInfo.email,
+          full_name: studentInfo.full_name,
+          admission_number: studentInfo.linked_admission_number
+        } : null,
+        processed_by: {
+          id: staff.id,
+          name: staff.full_name,
+          role: staff.role
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ UNIFIED APPROVAL: Error:', error);
+    throw error;
+  }
+}));
+
+/**
+ * @route   PUT /api/room-requests/unified/:id/cancel
+ * @desc    Cancel a room request (student can cancel their own)
+ * @access  Private
+ */
+router.put('/unified/:id/cancel', authMiddleware, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  console.log('🔍 UNIFIED CANCEL: Starting cancellation for request:', id);
+  console.log('🔍 UNIFIED CANCEL: User ID:', req.user.id);
+
+  try {
+    // Get user information
+    const { data: userRow, error: userError } = await supabase
+      .from('users')
+      .select('id, email, role')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (userError || !userRow) {
+      console.error('❌ UNIFIED CANCEL: User not found:', userError);
+      throw new ValidationError('User not found');
+    }
+
+    console.log('✅ UNIFIED CANCEL: User found:', userRow.id, 'Role:', userRow.role);
+
+    // Get room request
+    const { data: requestData, error: requestError } = await supabase
+      .from('room_requests')
+      .select(`
+        id,
+        user_id,
+        status,
+        created_at,
+        processed_at
+      `)
+      .eq('id', id)
+      .single();
+
+    if (requestError || !requestData) {
+      console.error('❌ UNIFIED CANCEL: Request not found:', requestError);
+      
+      // Check if request exists at all
+      const { data: allRequests } = await supabase
+        .from('room_requests')
+        .select('id, status, user_id')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      console.log('🔍 UNIFIED CANCEL: Recent requests:', allRequests);
+      
+      if (requestError && requestError.code === 'PGRST116') {
+        throw new ValidationError(`Room request with ID '${id}' does not exist`);
+      } else {
+        throw new ValidationError(`Room request not found: ${requestError?.message || 'Unknown error'}`);
+      }
+    }
+
+    const request = requestData;
+    console.log('✅ UNIFIED CANCEL: Request found:', request.id, 'Status:', request.status, 'User:', request.user_id);
+
+    // Check ownership (students can only cancel their own, staff can cancel any)
+    const isOwner = request.user_id === userRow.id;
+    const isStaff = ['admin', 'staff', 'operations'].includes(userRow.role);
+    
+    if (!isOwner && !isStaff) {
+      console.error('❌ UNIFIED CANCEL: Access denied - not owner and not staff');
+      throw new AuthorizationError('You can only cancel your own requests');
+    }
+
+    // Check if request can be cancelled
+    if (request.status === 'allocated') {
+      throw new ValidationError('Cannot cancel an allocated request. Please contact support.');
+    }
+
+    if (request.status === 'cancelled') {
+      throw new ValidationError('Request is already cancelled');
+    }
+
+    if (request.status === 'rejected') {
+      throw new ValidationError('Cannot cancel a rejected request');
+    }
+
+    console.log('✅ UNIFIED CANCEL: Request can be cancelled, proceeding...');
+
+    // Update request status to cancelled
+    const { error: updateError } = await supabase
+      .from('room_requests')
+      .update({
+        status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+        cancelled_by: userRow.id,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+
+    if (updateError) {
+      console.error('❌ UNIFIED CANCEL: Failed to update request:', updateError);
+      throw new Error(`Failed to cancel request: ${updateError.message}`);
+    }
+
+    console.log('✅ UNIFIED CANCEL: Request status updated to cancelled');
+
+    // If request was approved, we need to handle room allocation cleanup
+    if (request.status === 'approved') {
+      console.log('🔄 UNIFIED CANCEL: Request was approved, cleaning up room allocation...');
+      
+      // Get room allocation
+      const { data: allocationData } = await supabase
+        .from('room_allocations')
+        .select('room_id')
+        .eq('user_id', request.user_id)
+        .single();
+
+      if (allocationData) {
+        // Remove room allocation
+        await supabase
+          .from('room_allocations')
+          .delete()
+          .eq('user_id', request.user_id);
+
+        console.log('✅ UNIFIED CANCEL: Room allocation removed');
+
+        // Update room occupancy
+        const { data: roomData } = await supabase
+          .from('rooms')
+          .select('current_occupancy, capacity')
+          .eq('id', allocationData.room_id)
+          .single();
+
+        if (roomData) {
+          const newOccupancy = Math.max(0, roomData.current_occupancy - 1);
+          const newStatus = newOccupancy >= roomData.capacity ? 'full' : 
+                           newOccupancy > 0 ? 'partially_filled' : 'available';
+
+          await supabase
+            .from('rooms')
+            .update({
+              current_occupancy: newOccupancy,
+              status: newStatus,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', allocationData.room_id);
+
+          console.log('✅ UNIFIED CANCEL: Room occupancy updated:', newOccupancy);
+        }
+
+        // Clear student's room_id
+        await supabase
+          .from('user_profiles')
+          .update({ 
+            room_id: null,
+            updated_at: new Date().toISOString()
+          })
+          .eq('user_id', request.user_id);
+
+        await supabase
+          .from('users')
+          .update({ 
+            room_id: null,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', request.user_id);
+
+        console.log('✅ UNIFIED CANCEL: Student room_id cleared');
+      }
+    }
+
+    // Remove from waitlist if exists
+    await supabase
+      .from('room_waitlist')
+      .delete()
+      .eq('room_request_id', id);
+
+    console.log('🎉 UNIFIED CANCEL: Request cancelled successfully');
+
+    res.json({
+      success: true,
+      message: 'Room request cancelled successfully',
+      data: {
+        request_id: id,
+        previous_status: request.status,
+        cancelled_at: new Date().toISOString(),
+        cancelled_by: userRow.id
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ UNIFIED CANCEL: Error:', error);
+    throw error;
   }
 }));
 

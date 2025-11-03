@@ -227,7 +227,7 @@ router.get('/child-info', [
         *,
         user_profiles!inner(
           *,
-          users!inner(full_name, email, phone)
+          users!inner(id, full_name, email, phone, room_id)
         )
       `)
       .eq('user_id', appUser.id)
@@ -239,7 +239,7 @@ router.get('/child-info', [
         .from('user_profiles')
         .select(`
           *,
-          users!inner(full_name, email, phone)
+          users!inner(id, full_name, email, phone, room_id)
         `)
         .eq('parent_email', appUser.email)
         .maybeSingle();
@@ -258,7 +258,7 @@ router.get('/child-info', [
             *,
             user_profiles!inner(
               *,
-              users!inner(full_name, email, phone)
+              users!inner(id, full_name, email, phone, room_id)
             )
           `)
           .single();
@@ -311,14 +311,99 @@ router.get('/child-info', [
       .order('created_at', { ascending: false })
       .limit(10);
 
+    // Get room allocation data - try multiple methods to find room
+    let roomAllocation = null;
+    
+    console.log('🔍 Parent API - Looking for room allocation for student_profile_id:', parentRecord.user_profiles.id);
+    console.log('🔍 Parent API - Student user_id:', parentRecord.user_profiles.user_id);
+    console.log('🔍 Parent API - Users room_id:', parentRecord.user_profiles.users?.room_id);
+    
+    // Method 1: Try via room_allocations using student_profile_id
+    const { data: allocation1, error: allocError } = await supabase
+      .from('room_allocations')
+      .select(`
+        id,
+        room_id,
+        allocation_status,
+        allocation_date,
+        start_date,
+        end_date,
+        rooms(
+          id,
+          room_number,
+          floor,
+          room_type,
+          capacity,
+          price,
+          status
+        )
+      `)
+      .eq('student_profile_id', parentRecord.user_profiles.id)
+      .in('allocation_status', ['confirmed', 'active'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    console.log('🔍 Method 1 - room_allocations result:', allocation1 ? 'Found' : 'Not found');
+    if (allocError) console.error('❌ Method 1 error:', allocError);
+
+    if (allocation1) {
+      roomAllocation = allocation1;
+      console.log('✅ Using room allocation from room_allocations table');
+    } else {
+      // Method 2: Try via users.room_id (this is updated when HO approves room request)
+      const userRoomId = parentRecord.user_profiles.users?.room_id;
+      console.log('🔍 Method 2 - Trying users.room_id:', userRoomId);
+      
+      if (userRoomId) {
+        const { data: roomData, error: roomError } = await supabase
+          .from('rooms')
+          .select('*')
+          .eq('id', userRoomId)
+          .single();
+        
+        console.log('🔍 Method 2 - Room data result:', roomData ? 'Found' : 'Not found');
+        if (roomError) console.error('❌ Method 2 error:', roomError);
+        
+        if (roomData) {
+          roomAllocation = {
+            room_id: roomData.id,
+            allocation_status: 'confirmed',
+            rooms: roomData
+          };
+          console.log('✅ Using room data from users.room_id (updated by HO approval)');
+        }
+      } else {
+        console.log('⚠️ No room assignment found for this student');
+      }
+    }
+
+    console.log('🎯 Final roomAllocation:', roomAllocation);
+
+    // Get admission registry data for admission_number and course
+    const { data: admissionRegistry } = await supabase
+      .from('admission_registry')
+      .select('*')
+      .eq('user_id', parentRecord.user_profiles.user_id)
+      .maybeSingle();
+
+    // Merge admission_registry data into profile for better data access
+    const enrichedProfile = {
+      ...parentRecord.user_profiles,
+      admission_number: admissionRegistry?.admission_number || parentRecord.user_profiles.admission_number,
+      course: admissionRegistry?.course || parentRecord.user_profiles.course
+    };
+
     res.json({
       success: true,
       data: {
         child: {
-          profile: parentRecord.user_profiles,
+          profile: enrichedProfile,
           payments: payments || [],
           leaveRequests: leaveRequests || [],
-          complaints: complaints || []
+          complaints: complaints || [],
+          roomAllocation: roomAllocation || null,
+          admissionRegistry: admissionRegistry || null
         },
         parent: {
           email: parentRecord.email,
@@ -326,6 +411,101 @@ router.get('/child-info', [
           verified: parentRecord.verified
         }
       }
+    });
+
+  } catch (error) {
+    throw error;
+  }
+}));
+
+/**
+ * @route   PUT /api/parents/update-phone
+ * @desc    Update parent phone number and sync to child's profile
+ * @access  Private (Parent)
+ */
+router.put('/update-phone', [
+  authMiddleware,
+  body('phone')
+    .isMobilePhone('any')
+    .withMessage('Valid phone number is required')
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    throw new ValidationError('Validation failed', errors.array());
+  }
+
+  const { phone } = req.body;
+
+  try {
+    // Get current app user
+    const { data: appUser } = await supabase
+      .from('users')
+      .select('id, email, role')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (!appUser) {
+      throw new ValidationError('User not found');
+    }
+
+    // Get parent record
+    const { data: parentRecord } = await supabase
+      .from('parents')
+      .select('*, user_profiles!inner(id, user_id)')
+      .eq('user_id', appUser.id)
+      .single();
+
+    if (!parentRecord) {
+      throw new ValidationError('Parent record not found');
+    }
+
+    // Update parent phone in parents table
+    const { error: parentUpdateError } = await supabase
+      .from('parents')
+      .update({ phone })
+      .eq('id', parentRecord.id);
+
+    if (parentUpdateError) {
+      throw new ValidationError('Failed to update parent phone');
+    }
+
+    // Update parent phone in users table
+    const { error: userUpdateError } = await supabase
+      .from('users')
+      .update({ phone })
+      .eq('id', appUser.id);
+
+    if (userUpdateError) {
+      console.error('Failed to update user phone:', userUpdateError);
+    }
+
+    // Update parent_phone in child's user_profiles table
+    if (parentRecord.user_profiles) {
+      const { error: profileUpdateError } = await supabase
+        .from('user_profiles')
+        .update({ parent_phone: phone })
+        .eq('id', parentRecord.user_profiles.id);
+
+      if (profileUpdateError) {
+        console.error('Failed to update child profile parent_phone:', profileUpdateError);
+      }
+    }
+
+    // Also update parent_phone in admission_registry table if it exists
+    const { error: registryUpdateError } = await supabase
+      .from('admission_registry')
+      .update({ parent_phone: phone })
+      .eq('user_id', parentRecord.user_profiles.user_id);
+
+    if (registryUpdateError) {
+      console.error('Failed to update admission registry parent_phone:', registryUpdateError);
+      // Don't fail the entire operation if registry update fails
+    }
+
+    res.json({
+      success: true,
+      message: 'Phone number updated successfully',
+      data: { phone }
     });
 
   } catch (error) {
@@ -358,6 +538,72 @@ router.get('/verification-status', [
       data: {
         verified: parentRecord.verified,
         hasActiveOtp: !!parentRecord.otp_code && new Date() < new Date(parentRecord.otp_expires_at)
+      }
+    });
+
+  } catch (error) {
+    throw error;
+  }
+}));
+
+/**
+ * @route   GET /api/parents/debug-room-data
+ * @desc    Debug endpoint to check room data for parent's child
+ * @access  Private (Parent)
+ */
+router.get('/debug-room-data', [
+  authMiddleware
+], asyncHandler(async (req, res) => {
+  try {
+    // Resolve current app user record
+    const { data: appUser } = await supabase
+      .from('users')
+      .select('id, email, role')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (!appUser) {
+      throw new ValidationError('User not found');
+    }
+
+    // Get parent record
+    const { data: parentRecord } = await supabase
+      .from('parents')
+      .select(`
+        *,
+        user_profiles!inner(
+          *,
+          users!inner(id, full_name, email, phone, room_id)
+        )
+      `)
+      .eq('user_id', appUser.id)
+      .maybeSingle();
+
+    if (!parentRecord) {
+      throw new ValidationError('Parent not found');
+    }
+
+    // Get room allocation
+    const { data: roomAllocation } = await supabase
+      .from('room_allocations')
+      .select(`
+        *,
+        rooms(
+          *
+        )
+      `)
+      .eq('student_profile_id', parentRecord.user_profiles.id)
+      .in('allocation_status', ['confirmed', 'active'])
+      .maybeSingle();
+
+    res.json({
+      success: true,
+      debug: {
+        studentProfileId: parentRecord.user_profiles.id,
+        studentUserId: parentRecord.user_profiles.user_id,
+        usersRoomId: parentRecord.user_profiles.users?.room_id,
+        roomAllocation: roomAllocation,
+        allRoomAllocations: null
       }
     });
 

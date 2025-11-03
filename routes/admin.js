@@ -635,7 +635,11 @@ router.get('/complaints', authMiddleware, adminMiddleware, [
 
   let query = supabase
     .from('complaints')
-    .select('*')
+    .select(`
+      *,
+      users!complaints_user_id_fkey(id, full_name, email, room_id),
+      rooms!users_room_id_fkey(id, room_number, floor)
+    `)
     .range(offset, offset + limit - 1)
     .order('created_at', { ascending: false });
 

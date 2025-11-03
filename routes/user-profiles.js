@@ -73,7 +73,50 @@ router.post('/save', authMiddleware, asyncHandler(async (req, res) => {
   console.log('Safe profile data sample:', JSON.stringify(safeProfileData, null, 2));
 
   try {
-    // Use service role client to bypass RLS completely
+    // First, ensure the user exists in the users table
+    console.log('🔍 Checking if user exists in users table:', userId);
+    const { data: existingUser, error: userCheckError } = await supabaseAdmin
+      .from('users')
+      .select('id, full_name, email, auth_uid')
+      .eq('auth_uid', userId)
+      .single();
+
+    if (userCheckError && userCheckError.code === 'PGRST116') {
+      // User doesn't exist, create them first
+      console.log('👤 User not found in users table, creating user record...');
+      const { data: newUser, error: createUserError } = await supabaseAdmin
+        .from('users')
+        .insert({
+          auth_uid: userId,
+          full_name: safeUserData.full_name || 'Student',
+          email: req.user.email || '',
+          phone: safeUserData.phone || '',
+          role: 'student',
+          status: 'active',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .select()
+        .single();
+
+      if (createUserError) {
+        console.error('❌ Failed to create user:', createUserError);
+        throw new Error(`Failed to create user record: ${createUserError.message}`);
+      }
+      console.log('✅ User created successfully:', newUser.id);
+      // Update safeProfileData with the correct user_id
+      safeProfileData.user_id = newUser.id;
+    } else if (userCheckError) {
+      console.error('❌ Error checking user existence:', userCheckError);
+      throw new Error(`Failed to check user existence: ${userCheckError.message}`);
+    } else {
+      console.log('✅ User exists in users table:', existingUser.id);
+      // Update safeProfileData with the correct user_id
+      safeProfileData.user_id = existingUser.id;
+    }
+
+    // Now save the user profile
+    console.log('💾 Saving user profile...');
     const { data, error } = await supabaseAdmin
       .from('user_profiles')
       .upsert(safeProfileData, {
@@ -83,7 +126,7 @@ router.post('/save', authMiddleware, asyncHandler(async (req, res) => {
       .single();
 
     if (error) {
-      console.error('Error saving user profile:', error);
+      console.error('❌ Error saving user profile:', error);
       throw error;
     }
 
@@ -95,7 +138,7 @@ router.post('/save', authMiddleware, asyncHandler(async (req, res) => {
           ...safeUserData,
           updated_at: new Date().toISOString()
         })
-        .eq('id', userId);
+        .eq('id', safeProfileData.user_id);
 
       if (userUpdateError) {
         console.warn('User table update failed:', userUpdateError);

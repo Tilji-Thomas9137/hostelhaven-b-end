@@ -495,27 +495,48 @@ router.post('/login', [
   }
 
   try {
+    console.log('🔍 LOGIN: Attempting login with email:', loginEmail);
+    console.log('🔍 LOGIN: Raw identifier was:', rawIdentifier);
+    
     // Authenticate user with Supabase (primary attempt)
     let { data: authData, error: authError } = await supabase.auth.signInWithPassword({
       email: loginEmail,
       password
     });
+    
+    console.log('🔍 LOGIN: Primary auth attempt result:', { 
+      success: !authError, 
+      error: authError?.message,
+      userId: authData?.user?.id 
+    });
 
     // Fallback attempts when the user typed a username/admission number
     if (authError && rawIdentifier && !rawIdentifier.includes('@')) {
+      console.log('🔍 LOGIN: Primary failed, trying fallback for:', rawIdentifier);
       const candidateEmails = new Set();
       // Collect possible emails for this admission number / username
       const { data: allCandidates } = await supabase
         .from('users')
         .select('email')
         .or(`username.eq.${rawIdentifier},linked_admission_number.eq.${rawIdentifier},username.eq.PARENT-${rawIdentifier}`);
+      
+      console.log('🔍 LOGIN: Found candidates:', allCandidates);
       (allCandidates || []).forEach(u => u?.email && candidateEmails.add(u.email));
+      
+      console.log('🔍 LOGIN: Trying fallback emails:', Array.from(candidateEmails));
       // Try each candidate until one succeeds
       for (const candidate of candidateEmails) {
+        console.log('🔍 LOGIN: Trying candidate email:', candidate);
         const attempt = await supabase.auth.signInWithPassword({ email: candidate, password });
+        console.log('🔍 LOGIN: Candidate result:', { 
+          email: candidate, 
+          success: !attempt.error, 
+          error: attempt.error?.message 
+        });
         if (!attempt.error) {
           authData = attempt.data;
           authError = null;
+          console.log('🔍 LOGIN: Fallback succeeded!');
           break;
         }
       }
@@ -846,12 +867,17 @@ router.post('/resend-confirmation', [
  */
 router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
   try {
+    console.log('🔍 AUTH/ME: Request from auth_uid:', req.user.id);
+    console.log('🔍 AUTH/ME: Request email:', req.user.email);
+    
     // First, get the user from users table
     let { data: userProfile, error } = await supabase
       .from('users')
       .select('*')
       .eq('auth_uid', req.user.id)
       .single();
+    
+    console.log('🔍 AUTH/ME: User profile query result:', { userProfile, error });
 
     // If user doesn't exist, create it
     if (error || !userProfile) {
@@ -894,6 +920,9 @@ router.get('/me', authMiddleware, asyncHandler(async (req, res) => {
     if (userProfileDetails) {
       userProfile.user_profiles = userProfileDetails;
     }
+
+    console.log('🔍 AUTH/ME: Final user profile:', userProfile);
+    console.log('🔍 AUTH/ME: User role:', userProfile.role);
 
     res.json({
       success: true,

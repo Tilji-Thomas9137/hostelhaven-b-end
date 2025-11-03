@@ -252,12 +252,30 @@ router.post('/', authMiddleware, studentMiddleware, [
       throw new ValidationError('User not found');
     }
 
-    const { data: roomAllocation } = await supabase
+    // Check for room allocation in both room_allocations and user_profiles tables
+    let roomAllocation = null;
+    
+    const { data: roomAllocationData } = await supabase
       .from('room_allocations')
       .select('room_id')
       .eq('user_id', userRow.id)
       .in('allocation_status', ['active', 'confirmed'])
       .single();
+
+    if (roomAllocationData) {
+      roomAllocation = roomAllocationData;
+    } else {
+      // Check user_profiles table for room_id
+      const { data: userProfileData } = await supabase
+        .from('user_profiles')
+        .select('room_id')
+        .eq('user_id', userRow.id)
+        .single();
+
+      if (userProfileData && userProfileData.room_id) {
+        roomAllocation = { room_id: userProfileData.room_id };
+      }
+    }
 
     if (!roomAllocation) {
       throw new ValidationError('No room allocation found. Please contact hostel administration.');
@@ -807,24 +825,26 @@ router.get('/admin/analytics', authMiddleware, asyncHandler(async (req, res) => 
  */
 router.get('/check-room-allocation', authMiddleware, asyncHandler(async (req, res) => {
   try {
-    const { data: { session } } = await supabase.auth.getUser(req.user.access_token);
-    if (!session?.user) {
-      throw new ValidationError('Authentication required');
-    }
-
+    // The auth middleware already verified the token and set req.user
+    // We can directly use req.user.id which contains the auth_uid
+    
     // Get user profile
     const { data: userProfile } = await supabase
       .from('users')
       .select('id')
-      .eq('auth_uid', session.user.id)
+      .eq('auth_uid', req.user.id)
       .single();
 
     if (!userProfile) {
       throw new ValidationError('User profile not found');
     }
 
-    // Check if student has room allocation
-    const { data: roomAllocation } = await supabase
+    // Check if student has room allocation - try both room_allocations table and user_profiles table
+    let roomAllocation = null;
+    let roomInfo = null;
+
+    // First, try to find room allocation in room_allocations table
+    const { data: roomAllocationData } = await supabase
       .from('room_allocations')
       .select(`
         id,
@@ -839,6 +859,34 @@ router.get('/check-room-allocation', authMiddleware, asyncHandler(async (req, re
       .eq('user_id', userProfile.id)
       .in('allocation_status', ['active', 'confirmed'])
       .single();
+
+    if (roomAllocationData) {
+      roomAllocation = roomAllocationData;
+    } else {
+      // If not found in room_allocations, check user_profiles table for room_id
+      const { data: userProfileData } = await supabase
+        .from('user_profiles')
+        .select(`
+          room_id,
+          rooms!user_profiles_room_id_fkey(
+            room_number,
+            floor,
+            room_type
+          )
+        `)
+        .eq('user_id', userProfile.id)
+        .single();
+
+      if (userProfileData && userProfileData.room_id) {
+        // Create a mock room allocation object from user_profiles data
+        roomAllocation = {
+          id: 'profile-based-allocation',
+          room_id: userProfileData.room_id,
+          allocation_status: 'active',
+          rooms: userProfileData.rooms
+        };
+      }
+    }
 
     if (!roomAllocation) {
       return res.status(400).json({

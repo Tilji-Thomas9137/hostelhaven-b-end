@@ -83,6 +83,7 @@ const errorHandler = (err, req, res, next) => {
     error: error.name || 'ServerError',
     message: error.message || 'Server Error',
     details: error.details || null,
+    errors: error.details || null, // Also include as 'errors' for compatibility
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 };

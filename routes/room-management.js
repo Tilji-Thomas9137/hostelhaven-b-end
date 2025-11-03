@@ -497,7 +497,7 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
     // Check if room exists
     const { data: existingRoom, error: fetchError } = await supabase
       .from('rooms')
-      .select('id, room_number, current_occupancy, room_type, capacity')
+      .select('id, room_number, floor, current_occupancy, room_type, capacity, status')
       .eq('id', id)
       .single();
 
@@ -511,27 +511,28 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
       'double': 2,
       'triple': 3
     };
-    const capacity = capacityMap[room_type] || existingRoom.capacity;
+    const capacity = room_type ? (capacityMap[room_type] || existingRoom.capacity) : existingRoom.capacity;
 
-    // Check if new room number already exists (if changed)
+    // Business rule: floor must never change via update
+    if (typeof floor !== 'undefined' && parseInt(floor) !== existingRoom.floor) {
+      throw new ValidationError('Floor cannot be changed for an existing room. Create a new room and migrate allocations.');
+    }
+
+    // Prevent shrinking capacity below current occupants
+    if (room_type && capacity < (existingRoom.current_occupancy || 0)) {
+      throw new ValidationError('Cannot change room type that reduces capacity below current occupancy.');
+    }
+
+    // Business rule: room number cannot be changed via edit
     if (room_number && room_number !== existingRoom.room_number) {
-      const { data: duplicateRoom } = await supabase
-        .from('rooms')
-        .select('id')
-        .eq('room_number', room_number)
-        .neq('id', id)
-        .single();
-
-      if (duplicateRoom) {
-        throw new ValidationError('Room number already exists');
-      }
+      throw new ValidationError('Room number cannot be changed for an existing room.');
     }
 
     // Validate status based on current room status and occupancy
     if (status) {
-      const currentStatus = existingRoom.status?.toLowerCase();
+      const currentStatus = (existingRoom.status || '').toLowerCase();
       const occupied = existingRoom.current_occupancy || 0;
-      const capacity = existingRoom.capacity || 1;
+      const effectiveCapacity = capacity || existingRoom.capacity || 1;
       
       console.log('Validating status update:', { 
         roomId: id, 
@@ -544,22 +545,16 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
       
       let validStatuses = [];
       
-      // Status update rules based on current status and occupancy
-      if (currentStatus === 'full') {
-        // Full rooms cannot be updated unless room requests are cancelled
-        throw new ValidationError('Cannot update full room status. Please cancel room requests first.');
-      } else if (currentStatus === 'available') {
-        // Available rooms can be changed to any status
-        validStatuses = ['occupied', 'partially_filled', 'full', 'maintenance'];
-      } else if (currentStatus === 'partially_filled') {
-        // Partially filled rooms can only change to full or remain partially filled
-        validStatuses = ['full', 'partially_filled'];
-      } else if (currentStatus === 'occupied') {
-        // Occupied rooms can only change to full or remain occupied
-        validStatuses = ['full', 'occupied'];
-      } else {
-        // For maintenance or other statuses, allow all options
-        validStatuses = ['available', 'occupied', 'partially_filled', 'full', 'maintenance'];
+      // Enforce occupancy-consistent statuses
+      // If occupied == 0 -> cannot be 'full' or 'occupied'
+      // 0 < occupied < capacity -> must be 'partially_filled'
+      // occupied == capacity -> must be 'full'
+      if (occupied === 0) {
+        validStatuses = ['available', 'maintenance'];
+      } else if (occupied > 0 && occupied < effectiveCapacity) {
+        validStatuses = ['partially_filled', 'maintenance'];
+      } else if (occupied >= effectiveCapacity) {
+        validStatuses = ['full', 'maintenance'];
       }
       
       console.log('Valid statuses for current status', currentStatus, ':', validStatuses);
@@ -571,10 +566,9 @@ router.put('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async (re
 
     // Update the room
     const updateData = {
-      ...(room_number && { room_number }),
-      ...(floor && { floor: parseInt(floor) }),
+      // floor is intentionally not updatable
       ...(room_type && { room_type, capacity }),
-      ...(monthly_rent && { price: parseFloat(monthly_rent) }),
+      ...(typeof monthly_rent !== 'undefined' && { price: parseFloat(monthly_rent) }),
       ...(status && { status: status.toLowerCase() }),
       updated_at: new Date().toISOString()
     };
@@ -613,7 +607,7 @@ router.delete('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async 
     // Check if room exists
     const { data: room, error: fetchError } = await supabase
       .from('rooms')
-      .select('id, room_number, current_occupancy')
+      .select('id, room_number, current_occupancy, capacity')
       .eq('id', id)
       .single();
 
@@ -621,9 +615,23 @@ router.delete('/rooms/:id', authMiddleware, staffMiddleware, asyncHandler(async 
       throw new ValidationError('Room not found');
     }
 
-    // Check if room has occupants
-    if (room.current_occupancy > 0) {
+    // Check if room has occupants or active allocations
+    if ((room.current_occupancy || 0) > 0) {
       throw new ValidationError('Cannot delete room with occupants. Please deallocate all students first.');
+    }
+
+    const { data: activeAllocations, error: allocErr } = await supabase
+      .from('room_allocations')
+      .select('id')
+      .eq('room_id', id)
+      .in('allocation_status', ['confirmed', 'active']);
+
+    if (allocErr) {
+      throw new Error(`Failed to verify room allocations: ${allocErr.message}`);
+    }
+
+    if (activeAllocations && activeAllocations.length > 0) {
+      throw new ValidationError('Cannot delete room with active allocations. End allocations first.');
     }
 
     // Delete the room

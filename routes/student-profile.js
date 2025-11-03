@@ -16,6 +16,49 @@ router.get('/', authMiddleware, asyncHandler(async (req, res) => {
       email: req.user.email,
       auth_uid: req.user.id
     });
+
+    // First, ensure the user exists in the users table
+    console.log('🔍 Checking if user exists in users table:', req.user.id);
+    const { data: existingUser, error: userCheckError } = await supabaseAdmin
+      .from('users')
+      .select('id, full_name, email, auth_uid')
+      .eq('auth_uid', req.user.id)
+      .single();
+
+    if (userCheckError && userCheckError.code === 'PGRST116') {
+      // User doesn't exist, create them first
+      console.log('👤 User not found in users table, creating user record...');
+      const { data: newUser, error: createUserError } = await supabaseAdmin
+        .from('users')
+        .insert({
+          auth_uid: req.user.id,
+          email: req.user.email || '',
+          full_name: req.user.user_metadata?.full_name || 'Student',
+          role: 'student',
+          status: 'active',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .select()
+        .single();
+
+      if (createUserError) {
+        console.error('❌ Failed to create user:', createUserError);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to create user record'
+        });
+      }
+      console.log('✅ User created successfully:', newUser.id);
+    } else if (userCheckError) {
+      console.error('❌ Error checking user existence:', userCheckError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to check user existence'
+      });
+    } else {
+      console.log('✅ User exists in users table:', existingUser.id);
+    }
     
     // Query user_profiles table using service role (bypasses RLS)
     const { data: profileData, error: profileError } = await supabaseAdmin
@@ -35,9 +78,21 @@ router.get('/', authMiddleware, asyncHandler(async (req, res) => {
           updated_at
         )
       `)
-      // Prefer matching by auth_uid to avoid email mismatches
+      // Match by auth_uid
       .eq('users.auth_uid', req.user.id)
       .maybeSingle();
+    
+    // Also fetch admission registry data for admission_number and course
+    const { data: admissionData, error: admissionError } = await supabaseAdmin
+      .from('admission_registry')
+      .select('*')
+      .eq('user_id', profileData?.users?.id)
+      .maybeSingle();
+    
+    if (admissionError) {
+      console.error('Error fetching admission registry data:', admissionError);
+      // Don't fail the request, just log the error
+    }
     
     if (profileError) {
       console.error('Error fetching student profile:', profileError);
@@ -48,71 +103,7 @@ router.get('/', authMiddleware, asyncHandler(async (req, res) => {
     }
     
     if (!profileData) {
-      console.log('❌ No profile found for user by auth_uid, falling back to email match (if available)');
-      // Fallback to email match in case auth_uid isn't populated yet
-      if (req.user.email) {
-        const { data: byEmail } = await supabaseAdmin
-          .from('user_profiles')
-          .select(`
-            *,
-            users!inner(
-              id,
-              email,
-              full_name,
-              role,
-              phone,
-              room_id,
-              status,
-              auth_uid,
-              created_at,
-              updated_at
-            )
-          `)
-          .eq('users.email', req.user.email)
-          .maybeSingle();
-
-        if (byEmail) {
-          return res.json({ success: true, data: {
-            id: byEmail.id,
-            admission_number: byEmail.admission_number,
-            course: byEmail.course,
-            batch_year: byEmail.batch_year,
-            date_of_birth: byEmail.date_of_birth,
-            address: byEmail.address,
-            city: byEmail.city,
-            state: byEmail.state,
-            country: byEmail.country,
-            emergency_contact_name: byEmail.emergency_contact_name,
-            emergency_contact_phone: byEmail.emergency_contact_phone,
-            parent_name: byEmail.parent_name,
-            parent_phone: byEmail.parent_phone,
-            parent_email: byEmail.parent_email,
-            aadhar_number: byEmail.aadhar_number,
-            blood_group: byEmail.blood_group,
-            join_date: byEmail.join_date,
-            profile_status: byEmail.profile_status,
-            status: byEmail.status,
-            bio: byEmail.bio,
-            avatar_url: byEmail.avatar_url,
-            pincode: byEmail.pincode,
-            admission_number_verified: byEmail.admission_number_verified,
-            parent_contact_locked: byEmail.parent_contact_locked,
-            user: {
-              id: byEmail.users.id,
-              email: byEmail.users.email,
-              full_name: byEmail.users.full_name,
-              role: byEmail.users.role,
-              phone: byEmail.users.phone,
-              room_id: byEmail.users.room_id,
-              status: byEmail.users.status,
-              auth_uid: byEmail.users.auth_uid,
-              created_at: byEmail.users.created_at,
-              updated_at: byEmail.users.updated_at
-            }
-          }});
-        }
-      }
-      
+      console.log('❌ No profile found for user by auth_uid');
       return res.status(404).json({
         success: false,
         error: 'Student profile not found'
@@ -124,8 +115,9 @@ router.get('/', authMiddleware, asyncHandler(async (req, res) => {
     // Transform the data to match frontend expectations
     const transformedData = {
       id: profileData.id,
-      admission_number: profileData.admission_number,
-      course: profileData.course,
+      // Use admission_registry data if available, fallback to user_profiles data
+      admission_number: admissionData?.admission_number || profileData.admission_number,
+      course: admissionData?.course || profileData.course,
       batch_year: profileData.batch_year,
       date_of_birth: profileData.date_of_birth,
       address: profileData.address,
@@ -160,7 +152,19 @@ router.get('/', authMiddleware, asyncHandler(async (req, res) => {
         auth_uid: profileData.users.auth_uid,
         created_at: profileData.users.created_at,
         updated_at: profileData.users.updated_at
-      }
+      },
+      // Include admission registry data for additional fields
+      admission_registry: admissionData ? {
+        admission_number: admissionData.admission_number,
+        course: admissionData.course,
+        year: admissionData.year,
+        student_name: admissionData.student_name,
+        student_email: admissionData.student_email,
+        parent_name: admissionData.parent_name,
+        parent_email: admissionData.parent_email,
+        parent_phone: admissionData.parent_phone,
+        status: admissionData.status
+      } : null
     };
 
     res.json({

@@ -34,6 +34,8 @@ const configureRoutes = (app) => {
   const studentCleaningRequestsRoutes = require('../routes/student-cleaning-requests');
   const studentLeaveRequestsRoutes = require('../routes/student-leave-requests');
   const studentComplaintsRoutes = require('../routes/student-complaints');
+  const razorpayRoutes = require('../routes/razorpay');
+  const outpassRoutes = require('../routes/outpass');
 
   // Health check endpoint
   app.get('/health', (req, res) => {
@@ -81,6 +83,10 @@ const configureRoutes = (app) => {
   app.use('/api/student-cleaning-requests', studentCleaningRequestsRoutes);
   app.use('/api/student-leave-requests', studentLeaveRequestsRoutes);
   app.use('/api/student-complaints', studentComplaintsRoutes);
+  // Razorpay payment endpoints
+  app.use('/api/razorpay', razorpayRoutes);
+  // Outpass endpoints
+  app.use('/api/outpass', outpassRoutes);
 
   // 404 handler
   app.use('*', (req, res) => {
